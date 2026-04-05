@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>occt-kernel-wasm Browser Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 0 20px;
+            background: #f8f9fa;
+            color: #212529;
+        }
+        h1 { color: #0d6efd; margin-bottom: 8px; }
+        h2 { font-size: 1.1rem; margin-top: 28px; margin-bottom: 8px; }
+        pre {
+            background: #212529;
+            color: #f8f9fa;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.875rem;
+            line-height: 1.6;
+        }
+        button {
+            background: #0d6efd;
+            color: white;
+            border: none;
+            padding: 10px 22px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+            margin-top: 16px;
+        }
+        button:hover { background: #0b5ed7; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        .status { margin-top: 12px; font-size: 0.875rem; color: #6c757d; }
+    </style>
+</head>
+<body>
+    <h1>occt-kernel-wasm Browser Demo</h1>
+    <p>
+        This page demonstrates the <strong>occt-kernel-wasm</strong> library in a browser environment.
+        Click the button below to run the modelling pipeline.
+    </p>
+
+    <button id="run">Run Demo</button>
+    <div class="status" id="status">Idle.</div>
+
+    <h2>Output</h2>
+    <pre id="output">// Output will appear here...</pre>
+
+    <!--
+        In production, replace the mock module import with:
+        <script type="module">
+            import createModule from './dist/occt-kernel.js';
+            const wasmModule = await createModule();
+            ...
+        </script>
+    -->
+
+    <script type="module">
+        // ---------------------------------------------------------------------------
+        // Minimal mock so the demo works without a compiled WASM binary.
+        // Replace with the real createModule() import in production.
+        // ---------------------------------------------------------------------------
+
+        class MockNativeKernel {
+            constructor() {
+                this._shapes = new Map();
+                this._nextId = 1;
+            }
+            _store(kind, params) {
+                const id = this._nextId++;
+                this._shapes.set(id, { kind, params });
+                return id;
+            }
+            _require(id) {
+                if (!this._shapes.has(id)) throw new Error(JSON.stringify({ code: 'INVALID_HANDLE', detail: `No shape ${id}` }));
+                return this._shapes.get(id);
+            }
+            createBox(dx, dy, dz) {
+                if (dx <= 0 || dy <= 0 || dz <= 0) throw new Error(JSON.stringify({ code: 'INVALID_PARAMS', detail: 'Box dims must be > 0' }));
+                return this._store('box', { dx, dy, dz });
+            }
+            createCylinder(r, h) { return this._store('cylinder', { r, h }); }
+            createSphere(r)      { return this._store('sphere',   { r });    }
+            booleanSubtract(id1, id2) { this._require(id1); this._require(id2); return this._store('sub', { id1, id2 }); }
+            filletEdges(id, radius) { this._require(id); return this._store('fillet', { id, radius }); }
+            getTopology(id) {
+                this._require(id);
+                return JSON.stringify({ faceCount: 6, edgeCount: 12, vertexCount: 8, boundingBox: { xMin: 0, yMin: 0, zMin: 0, xMax: 1, yMax: 1, zMax: 1 }, isValid: true });
+            }
+            checkValidity(id) { return this._shapes.has(id); }
+            tessellate(id) {
+                this._require(id);
+                return JSON.stringify({ positions: [0,0,0,1,0,0,0,1,0], normals: [0,0,1,0,0,1,0,0,1], indices: [0,1,2] });
+            }
+            exportStep(id) {
+                this._require(id);
+                return 'ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((\'mock\'),\'2;1\');\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;';
+            }
+            disposeShape(id) { this._shapes.delete(id); }
+        }
+
+        // ---------------------------------------------------------------------------
+        // Inline TypeScript-equivalent kernel wrapper (ES module version)
+        // ---------------------------------------------------------------------------
+
+        class KernelError extends Error {
+            constructor(code, detail) {
+                super(`[${code}] ${detail}`);
+                this.name = 'KernelError';
+                this.code = code;
+                this.detail = detail;
+            }
+        }
+
+        class OcctKernel {
+            constructor(mod) {
+                this._native = new mod.OcctKernel();
+            }
+            createBox(p)        { return Object.freeze({ id: this._native.createBox(p.dx, p.dy, p.dz) }); }
+            createCylinder(p)   { return Object.freeze({ id: this._native.createCylinder(p.radius, p.height) }); }
+            createSphere(p)     { return Object.freeze({ id: this._native.createSphere(p.radius) }); }
+            booleanSubtract(p)  { return Object.freeze({ id: this._native.booleanSubtract(p.base.id, p.tool.id) }); }
+            filletEdges(p)      { return Object.freeze({ id: this._native.filletEdges(p.shape.id, p.radius) }); }
+            getTopology(h)      { return JSON.parse(this._native.getTopology(h.id)); }
+            checkValidity(h)    { return this._native.checkValidity(h.id); }
+            tessellate(p) {
+                const d = JSON.parse(this._native.tessellate(p.shape.id));
+                return { positions: new Float32Array(d.positions), normals: new Float32Array(d.normals), indices: new Uint32Array(d.indices) };
+            }
+            exportStep(p)       { return this._native.exportStep(p.shape.id); }
+            disposeShape(p)     { this._native.disposeShape(p.shape.id); }
+        }
+
+        // ---------------------------------------------------------------------------
+        // Demo logic
+        // ---------------------------------------------------------------------------
+
+        const output = document.getElementById('output');
+        const status = document.getElementById('status');
+        const runBtn = document.getElementById('run');
+
+        function log(msg) {
+            output.textContent += msg + '\n';
+            console.log(msg);
+        }
+
+        runBtn.addEventListener('click', async () => {
+            output.textContent = '';
+            runBtn.disabled = true;
+            status.textContent = 'Running...';
+
+            try {
+                // Initialise kernel (replace with real WASM factory in production)
+                const wasmModule = { OcctKernel: MockNativeKernel };
+                const kernel = new OcctKernel(wasmModule);
+
+                log('=== occt-kernel-wasm Browser Demo ===\n');
+
+                // Create primitives
+                const box = kernel.createBox({ dx: 100, dy: 60, dz: 40 });
+                log(`Box created. Handle: ${box.id}`);
+
+                const cyl = kernel.createCylinder({ radius: 15, height: 50 });
+                log(`Cylinder created. Handle: ${cyl.id}`);
+
+                // Boolean subtract
+                const subtracted = kernel.booleanSubtract({ base: box, tool: cyl });
+                log(`Boolean subtract done. Handle: ${subtracted.id}`);
+
+                // Fillet
+                const filleted = kernel.filletEdges({ shape: subtracted, radius: 3 });
+                log(`Fillet applied. Handle: ${filleted.id}`);
+
+                // Topology query
+                const topo = kernel.getTopology(filleted);
+                log('\nTopology:');
+                log(`  Faces: ${topo.faceCount}, Edges: ${topo.edgeCount}, Vertices: ${topo.vertexCount}`);
+                log(`  Valid: ${topo.isValid}`);
+
+                // Tessellate
+                const mesh = kernel.tessellate({ shape: filleted, linearDeflection: 0.5 });
+                log(`\nTessellation:`);
+                log(`  Vertices:  ${mesh.positions.length / 3}`);
+                log(`  Triangles: ${mesh.indices.length / 3}`);
+
+                // Export STEP
+                const step = kernel.exportStep({ shape: filleted });
+                log(`\nSTEP export (first line): ${step.split('\n')[0]}`);
+                log(`STEP length: ${step.length} chars`);
+
+                // Dispose
+                [box, cyl, subtracted, filleted].forEach(h => kernel.disposeShape({ shape: h }));
+                log('\nAll shapes disposed. Done ✓');
+
+                status.textContent = 'Completed successfully.';
+            } catch (err) {
+                log(`\nERROR: ${err.message ?? err}`);
+                status.textContent = 'Error. See output above.';
+            } finally {
+                runBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

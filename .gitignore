@@ -137,3 +137,30 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# ----------------------------------------------------------------------------
+# C++ / WASM build artifacts
+# ----------------------------------------------------------------------------
+
+# CMake build directories
+build-wasm-release/
+build-wasm-debug/
+build-native-release/
+build-native-debug/
+build-native/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# WASM output (committed only when releasing a pre-built binary)
+dist/*.js
+dist/*.wasm
+dist/*.map
+
+# Third-party dependencies (OCCT source + build)
+third-party/occt-src/
+third-party/occt-build-wasm/
+third-party/occt-wasm/
+
+# Emscripten cache
+.emscripten_cache/
