@@ -1,0 +1,21 @@
+occt-kernel-wasm
+Copyright (c) 2026 Jože Vovk
+
+This product includes software developed by third parties. See THIRD_PARTY_LICENSES.md
+for the full list of dependencies and their respective licenses.
+
+NOTICE REGARDING OPEN CASCADE TECHNOLOGY (OCCT)
+-------------------------------------------------
+This software uses Open CASCADE Technology (OCCT) as its geometric and topological
+kernel. OCCT is licensed under the GNU Lesser General Public License version 2.1
+with an exception that permits linking with proprietary software (the "OCCT exception").
+
+OCCT is copyright of Open CASCADE S.A.S. (Paris, France).
+OCCT source code and license information: https://dev.opencascade.org/
+
+Users of this library who redistribute it must comply with the LGPL-2.1 obligations
+for the OCCT dependency, including providing access to OCCT source code or a written
+offer to provide it. The OCCT exception to the LGPL permits linking OCCT into
+non-GPL applications.
+
+See THIRD_PARTY_LICENSES.md for the complete text of all applicable licenses.
