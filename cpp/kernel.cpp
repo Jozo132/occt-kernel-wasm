@@ -462,7 +462,8 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
             Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
             if (tri.IsNull()) continue;
 
-            const gp_Trsf& trsf = loc.IsIdentity() ? gp_Trsf() : loc.IsIdentity() ? gp_Trsf() : loc;
+            gp_Trsf trsf;
+            if (!loc.IsIdentity()) trsf = loc.Transformation();
             bool reversed = (face.Orientation() == TopAbs_REVERSED);
 
             // Nodes
@@ -473,8 +474,8 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
                 positions_ss << pt.X() << "," << pt.Y() << "," << pt.Z();
                 // Compute normal from triangulation if available, otherwise use 0,0,1
                 if (tri->HasNormals()) {
-                    gp_Vec3f nv = tri->Normal(n);
-                    gp_Vec nVec(nv.x(), nv.y(), nv.z());
+                    gp_Dir nDir = tri->Normal(n);
+                    gp_Vec nVec(nDir.X(), nDir.Y(), nDir.Z());
                     nVec.Transform(trsf);
                     double len = nVec.Magnitude();
                     if (len > 1e-9) nVec /= len;
@@ -508,7 +509,8 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
             Handle(Poly_Triangulation) tri;
             BRep_Tool::PolygonOnTriangulation(edge, poly, tri, loc);
             if (!poly.IsNull() && !tri.IsNull()) {
-                const gp_Trsf& trsf = loc.IsIdentity() ? gp_Trsf() : loc;
+                gp_Trsf trsf;
+                if (!loc.IsIdentity()) trsf = loc.Transformation();
                 for (int n = 1; n <= poly->NbNodes(); ++n) {
                     gp_Pnt pt = tri->Node(poly->Nodes()(n)).Transformed(trsf);
                     if (!firstEdge) edges_ss << ",";

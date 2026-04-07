@@ -99,12 +99,17 @@ if(OCCT_KERNEL_WASM)
         PRIVATE ${OpenCASCADE_LIBRARIES}
     )
 
+    # Ensure the linker can find OCCT static libraries by path
+    if(DEFINED OCCT_ROOT)
+        target_link_directories(occt-kernel PRIVATE "${OCCT_ROOT}/lib")
+    endif()
+
     # Emscripten link flags
     set(EM_LINK_FLAGS
         # Use Emscripten embind
         "--bind"
-        # WebAssembly exceptions (required for OCCT Standard_Failure propagation)
-        "-fwasm-exceptions"
+        # C++ exceptions (required for OCCT Standard_Failure propagation)
+        "-sDISABLE_EXCEPTION_CATCHING=0"
         # Modularise the JS output so it can be imported as an ES module or CJS
         "-sMODULARIZE=1"
         "-sEXPORT_NAME=createOcctKernelModule"
@@ -116,7 +121,7 @@ if(OCCT_KERNEL_WASM)
         # Filesystem (needed for STEP import/export via temp files)
         "-sFORCE_FILESYSTEM=1"
         # Stack size
-        "-sSTACK_SIZE=8MB"
+        "-sTOTAL_STACK=8MB"
         # Exports
         "-sEXPORTED_RUNTIME_METHODS=[ccall,cwrap,FS]"
         # Production: strip assertions
@@ -133,7 +138,6 @@ if(OCCT_KERNEL_WASM)
 
     target_compile_options(occt-kernel
         PRIVATE
-            "-fwasm-exceptions"
             "$<$<CONFIG:Release>:-O3>"
             "$<$<CONFIG:Debug>:-O0;-g>"
     )
