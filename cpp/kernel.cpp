@@ -17,6 +17,7 @@
 #include <TopoDS.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 
@@ -55,6 +56,11 @@
 #include <STEPControl_Writer.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
+#include <XSControl_WorkSession.hxx>
+#include <XSControl_TransferReader.hxx>
+#include <Interface_Check.hxx>
+#include <Interface_CheckIterator.hxx>
+#include <ShapeFix_Shape.hxx>
 
 // Topology iteration
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -66,9 +72,11 @@
 #include <OSD_Path.hxx>
 #include <OSD_Protection.hxx>
 
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 #include <cmath>
 
 #ifndef M_PI
@@ -101,6 +109,344 @@ static std::string makeErrorJson(const std::string& code, const std::string& det
 static void throwKernelError(const std::string& code, const std::string& detail) {
     throw std::runtime_error(makeErrorJson(code, detail));
 }
+
+namespace {
+
+struct StepImportOptions {
+    bool heal = false;
+    bool sew = false;
+    bool fixSameParameter = false;
+    bool fixSolid = false;
+    double sewingTolerance = 1.0e-6;
+};
+
+struct StepImportMessage {
+    std::string phase;
+    std::string severity;
+    std::string text;
+    int entityNumber = 0;
+};
+
+struct StepImportRunResult {
+    std::string readStatus = "IFSelect_RetVoid";
+    std::string transferStatus = "NOT_RUN";
+    int rootCount = 0;
+    int transferredRootCount = 0;
+    bool isValid = false;
+    bool wasValidBeforeHealing = false;
+    bool healed = false;
+    bool hasShape = false;
+    TopoDS_Shape shape;
+    std::vector<StepImportMessage> messages;
+};
+
+std::string escapeJson(const std::string& input) {
+    std::string out;
+    out.reserve(input.size());
+    for (char ch : input) {
+        switch (ch) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += ch; break;
+        }
+    }
+    return out;
+}
+
+void addStepImportMessage(std::vector<StepImportMessage>& messages,
+                          const std::string& phase,
+                          const std::string& severity,
+                          const std::string& text,
+                          int entityNumber = 0) {
+    if (text.empty()) {
+        return;
+    }
+
+    StepImportMessage message;
+    message.phase = phase;
+    message.severity = severity;
+    message.text = text;
+    message.entityNumber = entityNumber;
+    messages.push_back(message);
+}
+
+std::string stepReturnStatusToString(IFSelect_ReturnStatus status) {
+    switch (status) {
+    case IFSelect_RetVoid: return "IFSelect_RetVoid";
+    case IFSelect_RetDone: return "IFSelect_RetDone";
+    case IFSelect_RetError: return "IFSelect_RetError";
+    case IFSelect_RetFail: return "IFSelect_RetFail";
+    case IFSelect_RetStop: return "IFSelect_RetStop";
+    }
+    return "IFSelect_RetFail";
+}
+
+std::string stepTransferStatusToString(int rootCount, int transferredRootCount, int shapeCount) {
+    if (rootCount == 0) {
+        return "EMPTY";
+    }
+    if (transferredRootCount <= 0 || shapeCount <= 0) {
+        return "FAILED";
+    }
+    if (transferredRootCount < rootCount) {
+        return "PARTIAL";
+    }
+    return "DONE";
+}
+
+void collectCheckMessages(const Interface_CheckIterator& checks,
+                          const std::string& phase,
+                          std::vector<StepImportMessage>& messages) {
+    for (checks.Start(); checks.More(); checks.Next()) {
+        const Handle(Interface_Check)& check = checks.Value();
+        const int entityNumber = checks.Number();
+
+        if (check.IsNull()) {
+            continue;
+        }
+
+        for (int i = 1; i <= check->NbFails(); ++i) {
+            addStepImportMessage(messages, phase, "fail", check->CFail(i), entityNumber);
+        }
+        for (int i = 1; i <= check->NbWarnings(); ++i) {
+            addStepImportMessage(messages, phase, "warning", check->CWarning(i), entityNumber);
+        }
+        for (int i = 1; i <= check->NbInfoMsgs(); ++i) {
+            addStepImportMessage(messages, phase, "info", check->CInfoMsg(i), entityNumber);
+        }
+    }
+}
+
+TopoDS_Shape applyImportHealing(const TopoDS_Shape& sourceShape,
+                                const StepImportOptions& options,
+                                StepImportRunResult& result) {
+    TopoDS_Shape shape = sourceShape;
+    bool touched = false;
+
+    result.wasValidBeforeHealing = BRepCheck_Analyzer(shape).IsValid();
+
+    if (options.sew) {
+        BRepBuilderAPI_Sewing sewing(options.sewingTolerance);
+        sewing.Load(shape);
+        sewing.Perform();
+        const TopoDS_Shape& sewedShape = sewing.SewedShape();
+        if (!sewedShape.IsNull()) {
+            shape = sewedShape;
+            touched = true;
+            addStepImportMessage(result.messages,
+                                 "heal",
+                                 "info",
+                                 "Applied sewing with tolerance " + std::to_string(options.sewingTolerance));
+            if (sewing.NbFreeEdges() > 0) {
+                addStepImportMessage(result.messages,
+                                     "heal",
+                                     "warning",
+                                     "Sewing left " + std::to_string(sewing.NbFreeEdges()) + " free edge(s)");
+            }
+        }
+    }
+
+    if (options.heal || options.fixSameParameter || options.fixSolid) {
+        Handle(ShapeFix_Shape) fixer = new ShapeFix_Shape(shape);
+        fixer->FixFreeShellMode() = options.heal ? 1 : 0;
+        fixer->FixFreeFaceMode() = options.heal ? 1 : 0;
+        fixer->FixFreeWireMode() = options.heal ? 1 : 0;
+        fixer->FixVertexPositionMode() = options.heal ? 1 : 0;
+        fixer->FixVertexTolMode() = options.heal ? 1 : 0;
+        fixer->FixSameParameterMode() = (options.heal || options.fixSameParameter) ? 1 : 0;
+        fixer->FixSolidMode() = (options.heal || options.fixSolid) ? 1 : 0;
+        if (options.fixSolid) {
+            fixer->FixSolidTool()->CreateOpenSolidMode() = Standard_False;
+        }
+
+        if (fixer->Perform()) {
+            TopoDS_Shape fixedShape = fixer->Shape();
+            if (!fixedShape.IsNull()) {
+                shape = fixedShape;
+                touched = true;
+            }
+            addStepImportMessage(result.messages,
+                                 "heal",
+                                 "info",
+                                 "Applied ShapeFix post-processing");
+        }
+    }
+
+    result.healed = touched;
+    result.isValid = BRepCheck_Analyzer(shape).IsValid();
+
+    if (!result.isValid) {
+        addStepImportMessage(result.messages,
+                             "validation",
+                             "warning",
+                             "Imported shape is not valid according to BRepCheck_Analyzer");
+    } else if (result.healed && !result.wasValidBeforeHealing) {
+        addStepImportMessage(result.messages,
+                             "validation",
+                             "info",
+                             "Healing produced a valid shape");
+    }
+
+    return shape;
+}
+
+bool hasFailureMessage(const StepImportRunResult& result) {
+    for (const StepImportMessage& message : result.messages) {
+        if (message.severity == "fail") {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string inferImportFailureDetail(const StepImportRunResult& result) {
+    for (const StepImportMessage& message : result.messages) {
+        if (message.severity == "fail") {
+            return message.text;
+        }
+    }
+    for (const StepImportMessage& message : result.messages) {
+        if (message.severity == "warning") {
+            return message.text;
+        }
+    }
+    return "STEP import failed";
+}
+
+std::string buildStepImportResultJson(const StepImportRunResult& result, uint32_t shapeId) {
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"readStatus\":\"" << escapeJson(result.readStatus) << "\",";
+    ss << "\"transferStatus\":\"" << escapeJson(result.transferStatus) << "\",";
+    ss << "\"rootCount\":" << result.rootCount << ",";
+    ss << "\"transferredRootCount\":" << result.transferredRootCount << ",";
+    ss << "\"isValid\":" << (result.isValid ? "true" : "false") << ",";
+    ss << "\"wasValidBeforeHealing\":" << (result.wasValidBeforeHealing ? "true" : "false") << ",";
+    ss << "\"healed\":" << (result.healed ? "true" : "false") << ",";
+    if (shapeId != 0) {
+        ss << "\"shapeId\":" << shapeId << ",";
+    }
+    ss << "\"messageList\":[";
+    for (std::size_t i = 0; i < result.messages.size(); ++i) {
+        const StepImportMessage& message = result.messages[i];
+        if (i > 0) {
+            ss << ",";
+        }
+        ss << "{";
+        ss << "\"phase\":\"" << escapeJson(message.phase) << "\",";
+        ss << "\"severity\":\"" << escapeJson(message.severity) << "\",";
+        ss << "\"text\":\"" << escapeJson(message.text) << "\"";
+        if (message.entityNumber > 0) {
+            ss << ",\"entityNumber\":" << message.entityNumber;
+        }
+        ss << "}";
+    }
+    ss << "]";
+    ss << "}";
+    return ss.str();
+}
+
+StepImportRunResult runStepImport(const std::string& content, const StepImportOptions& options) {
+    StepImportRunResult result;
+
+    if (content.empty() || content.find_first_not_of(" \t\r\n") == std::string::npos) {
+        result.readStatus = "IFSelect_RetError";
+        result.transferStatus = "FAILED";
+        addStepImportMessage(result.messages, "load", "fail", "STEP content is empty");
+        return result;
+    }
+
+    try {
+        TCollection_AsciiString tmpPath("/tmp/occt_import_tmp.step");
+        {
+            std::ofstream ofs(tmpPath.ToCString());
+            if (!ofs) {
+                result.readStatus = "IFSelect_RetError";
+                result.transferStatus = "FAILED";
+                addStepImportMessage(result.messages,
+                                     "load",
+                                     "fail",
+                                     "Cannot create temporary file for STEP import");
+                return result;
+            }
+            ofs << content;
+        }
+
+        STEPControl_Reader reader;
+        const IFSelect_ReturnStatus readStatus = reader.ReadFile(tmpPath.ToCString());
+        result.readStatus = stepReturnStatusToString(readStatus);
+
+        Handle(XSControl_WorkSession) workSession = reader.WS();
+        if (!workSession.IsNull()) {
+            collectCheckMessages(workSession->ModelCheckList(), "load", result.messages);
+        }
+
+        if (readStatus != IFSelect_RetDone) {
+            result.transferStatus = "FAILED";
+            if (!hasFailureMessage(result)) {
+                addStepImportMessage(result.messages,
+                                     "load",
+                                     "fail",
+                                     "STEPControl_Reader::ReadFile returned " + result.readStatus);
+            }
+            return result;
+        }
+
+        result.rootCount = reader.NbRootsForTransfer();
+        result.transferredRootCount = reader.TransferRoots();
+
+        if (!workSession.IsNull() && !workSession->TransferReader().IsNull()) {
+            collectCheckMessages(workSession->TransferReader()->LastCheckList(), "transfer", result.messages);
+        }
+
+        result.transferStatus = stepTransferStatusToString(result.rootCount,
+                                                           result.transferredRootCount,
+                                                           reader.NbShapes());
+
+        if (reader.NbShapes() == 0) {
+            if (!hasFailureMessage(result)) {
+                addStepImportMessage(result.messages,
+                                     "transfer",
+                                     "fail",
+                                     "No shapes found in STEP file");
+            }
+            return result;
+        }
+
+        TopoDS_Shape importedShape = reader.OneShape();
+        if (importedShape.IsNull()) {
+            result.transferStatus = "FAILED";
+            addStepImportMessage(result.messages,
+                                 "transfer",
+                                 "fail",
+                                 "STEP translation produced a null shape");
+            return result;
+        }
+
+        result.shape = applyImportHealing(importedShape, options, result);
+        result.hasShape = !result.shape.IsNull();
+        return result;
+    } catch (const Standard_Failure& sf) {
+        result.transferStatus = "FAILED";
+        addStepImportMessage(result.messages,
+                             "transfer",
+                             "fail",
+                             sf.GetMessageString());
+        return result;
+    } catch (const std::exception& ex) {
+        result.transferStatus = "FAILED";
+        addStepImportMessage(result.messages,
+                             "transfer",
+                             "fail",
+                             ex.what());
+        return result;
+    }
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // PIMPL
@@ -546,34 +892,33 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
 // ---------------------------------------------------------------------------
 
 uint32_t OcctKernel::importStep(const std::string& content) {
-    if (content.empty()) {
-        throwKernelError("IMPORT_FAILED", "STEP content is empty");
+    const StepImportRunResult result = runStepImport(content, StepImportOptions());
+    if (!result.hasShape) {
+        throwKernelError("IMPORT_FAILED", inferImportFailureDetail(result));
     }
-    try {
-        // Write content to a temporary in-memory file via OSD_File
-        TCollection_AsciiString tmpPath("/tmp/occt_import_tmp.step");
-        {
-            std::ofstream ofs(tmpPath.ToCString());
-            if (!ofs) throwKernelError("IMPORT_FAILED", "Cannot create temporary file for STEP import");
-            ofs << content;
-        }
-        STEPControl_Reader reader;
-        IFSelect_ReturnStatus status = reader.ReadFile(tmpPath.ToCString());
-        if (status != IFSelect_RetDone) {
-            throwKernelError("IMPORT_FAILED", "STEPControl_Reader::ReadFile failed");
-        }
-        reader.TransferRoots();
-        if (reader.NbShapes() == 0) {
-            throwKernelError("IMPORT_FAILED", "No shapes found in STEP file");
-        }
-        TopoDS_Shape shape = reader.OneShape();
-        return storeShape(shape);
-    } catch (const std::runtime_error&) {
-        throw;
-    } catch (const Standard_Failure& sf) {
-        throwKernelError("IMPORT_FAILED", sf.GetMessageString());
+
+    return storeShape(result.shape);
+}
+
+std::string OcctKernel::importStepDetailed(const std::string& content,
+                                           bool heal,
+                                           bool sew,
+                                           bool fixSameParameter,
+                                           bool fixSolid,
+                                           double sewingTolerance) {
+    StepImportOptions options;
+    options.heal = heal;
+    options.sew = sew;
+    options.fixSameParameter = fixSameParameter;
+    options.fixSolid = fixSolid;
+    options.sewingTolerance = sewingTolerance > 0 ? sewingTolerance : 1.0e-6;
+
+    StepImportRunResult result = runStepImport(content, options);
+    uint32_t shapeId = 0;
+    if (result.hasShape) {
+        shapeId = storeShape(result.shape);
     }
-    return 0;
+    return buildStepImportResultJson(result, shapeId);
 }
 
 std::string OcctKernel::exportStep(uint32_t id) {

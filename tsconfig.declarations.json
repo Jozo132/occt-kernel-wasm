@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declarationMap": false,
+    "emitDeclarationOnly": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": false
+  },
+  "files": ["src/index.ts"],
+  "include": ["src/index.ts"],
+  "exclude": ["node_modules", "dist", "tests", "examples", "src/index.browser.ts", "src/index.node.ts"]
+}

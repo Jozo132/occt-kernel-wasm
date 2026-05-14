@@ -6,13 +6,18 @@
   "license": "MIT",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
+  "browser": "dist/index.mjs",
   "types": "dist/index.d.ts",
+  "jsdelivr": "dist/index.mjs",
+  "unpkg": "dist/index.mjs",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    }
+      "require": "./dist/index.js"
+    },
+    "./occt-kernel.js": "./dist/occt-kernel.js",
+    "./occt-kernel.wasm": "./dist/occt-kernel.wasm"
   },
   "files": [
     "dist/",
@@ -20,14 +25,14 @@
     "THIRD_PARTY_LICENSES.md"
   ],
   "scripts": {
-    "build": "tsc --project tsconfig.json",
+    "build": "node scripts/build-dist.mjs",
     "build:wasm": "bash scripts/build-wasm.sh",
     "build:occt": "bash scripts/build-occt.sh",
     "build:native": "bash scripts/build-native.sh",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --project tsconfig.check.json",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -50,6 +55,7 @@
   },
   "homepage": "https://github.com/Jozo132/occt-kernel-wasm#readme",
   "devDependencies": {
+    "esbuild": "^0.25.4",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.12.12",
     "jest": "^29.7.0",

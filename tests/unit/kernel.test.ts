@@ -354,6 +354,60 @@ describe('tessellate', () => {
 // importStep / exportStep
 // ---------------------------------------------------------------------------
 
+describe('importStepDetailed', () => {
+    const validStep = [
+        'ISO-10303-21;',
+        'HEADER;',
+        "FILE_DESCRIPTION(('test'),'2;1');",
+        "FILE_NAME('','',(''),(''),'','','');",
+        "FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));",
+        'ENDSEC;',
+        'DATA;',
+        'ENDSEC;',
+        'END-ISO-10303-21;',
+    ].join('\n');
+
+    it('returns structured reader and transfer diagnostics for valid content', () => {
+        const k = makeKernel();
+        const result = k.importStepDetailed({ content: validStep });
+
+        expect(result.readStatus).toBe('IFSelect_RetDone');
+        expect(result.transferStatus).toBe('DONE');
+        expect(result.rootCount).toBeGreaterThan(0);
+        expect(result.transferredRootCount).toBeGreaterThan(0);
+        expect(result.shape?.id).toBeGreaterThan(0);
+        expect(result.isValid).toBe(true);
+        expect(Array.isArray(result.messageList)).toBe(true);
+    });
+
+    it('returns structured failure details instead of throwing for invalid STEP content', () => {
+        const k = makeKernel();
+        const result = k.importStepDetailed({ content: 'not a step file at all' });
+
+        expect(result.shape).toBeUndefined();
+        expect(result.transferStatus).toBe('FAILED');
+        expect(result.messageList.some((message) => message.severity === 'fail')).toBe(true);
+    });
+
+    it('applies healing options and reports improved validity', () => {
+        const k = makeKernel();
+        const result = k.importStepDetailed({
+            content: `${validStep}\nMOCK_INVALID_SHAPE`,
+            options: {
+                heal: true,
+                sew: true,
+                fixSameParameter: true,
+                fixSolid: true,
+            },
+        });
+
+        expect(result.shape?.id).toBeGreaterThan(0);
+        expect(result.wasValidBeforeHealing).toBe(false);
+        expect(result.healed).toBe(true);
+        expect(result.isValid).toBe(true);
+    });
+});
+
 describe('importStep', () => {
     const validStep = [
         'ISO-10303-21;',

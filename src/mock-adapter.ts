@@ -23,6 +23,23 @@ interface MockShape {
     params: Record<string, unknown>;
 }
 
+interface MockImportResult {
+    readStatus: string;
+    transferStatus: string;
+    rootCount: number;
+    transferredRootCount: number;
+    messageList: Array<{
+        phase: 'load' | 'transfer' | 'heal' | 'validation';
+        severity: 'info' | 'warning' | 'fail';
+        text: string;
+        entityNumber?: number;
+    }>;
+    shapeId?: number;
+    isValid: boolean;
+    wasValidBeforeHealing: boolean;
+    healed: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Mock native kernel class
 // ---------------------------------------------------------------------------
@@ -127,18 +144,19 @@ export class MockNativeKernel {
     // -- Queries --
 
     getTopology(id: number): string {
-        this._require(id);
+        const shape = this._require(id);
         return JSON.stringify({
             faceCount: 6,
             edgeCount: 12,
             vertexCount: 8,
             boundingBox: { xMin: 0, yMin: 0, zMin: 0, xMax: 1, yMax: 1, zMax: 1 },
-            isValid: true,
+            isValid: shape.params.invalid !== true,
         });
     }
 
     checkValidity(id: number): boolean {
-        return this._shapes.has(id);
+        const shape = this._shapes.get(id);
+        return shape !== undefined && shape.params.invalid !== true;
     }
 
     // -- Tessellation --
@@ -156,13 +174,71 @@ export class MockNativeKernel {
     // -- Import / export --
 
     importStep(content: string): number {
-        if (!content || content.trim().length === 0) {
-            throw new KernelError('IMPORT_FAILED', 'STEP content is empty');
+        const result = JSON.parse(this.importStepDetailed(content, false, false, false, false, 1e-6)) as MockImportResult;
+        if (result.shapeId === undefined) {
+            throw new KernelError('IMPORT_FAILED', result.messageList[0]?.text ?? 'STEP import failed');
         }
+        return result.shapeId;
+    }
+
+    importStepDetailed(
+        content: string,
+        heal: boolean,
+        sew: boolean,
+        fixSameParameter: boolean,
+        fixSolid: boolean,
+        _sewingTolerance: number,
+    ): string {
+        const trimmed = typeof content === 'string' ? content.trim() : '';
+        if (trimmed.length === 0) {
+            return JSON.stringify({
+                readStatus: 'IFSelect_RetError',
+                transferStatus: 'FAILED',
+                rootCount: 0,
+                transferredRootCount: 0,
+                messageList: [{ phase: 'load', severity: 'fail', text: 'STEP content is empty' }],
+                isValid: false,
+                wasValidBeforeHealing: false,
+                healed: false,
+            } satisfies MockImportResult);
+        }
+
         if (!content.includes('ISO-10303')) {
-            throw new KernelError('IMPORT_FAILED', 'Content does not appear to be a valid STEP file');
+            return JSON.stringify({
+                readStatus: 'IFSelect_RetFail',
+                transferStatus: 'FAILED',
+                rootCount: 1,
+                transferredRootCount: 0,
+                messageList: [{ phase: 'load', severity: 'fail', text: 'Content does not appear to be a valid STEP file' }],
+                isValid: false,
+                wasValidBeforeHealing: false,
+                healed: false,
+            } satisfies MockImportResult);
         }
-        return this._store('imported', { content: content.slice(0, 64) });
+
+        const wasValidBeforeHealing = !content.includes('MOCK_INVALID_SHAPE');
+        const healedShape = !wasValidBeforeHealing && (heal || sew || fixSameParameter || fixSolid);
+        const isValid = wasValidBeforeHealing || healedShape;
+        const shapeId = this._store('imported', {
+            content: content.slice(0, 64),
+            invalid: !isValid,
+        });
+
+        return JSON.stringify({
+            readStatus: 'IFSelect_RetDone',
+            transferStatus: 'DONE',
+            rootCount: 1,
+            transferredRootCount: 1,
+            messageList: [
+                ...(!wasValidBeforeHealing
+                    ? [{ phase: 'validation' as const, severity: isValid ? 'info' as const : 'warning' as const, text: isValid ? 'Healing produced a valid shape' : 'Imported shape is not valid according to BRepCheck_Analyzer' }]
+                    : []),
+            ],
+            shapeId,
+            isValid,
+            wasValidBeforeHealing,
+            healed: healedShape,
+        } satisfies MockImportResult);
     }
 
     exportStep(id: number): string {

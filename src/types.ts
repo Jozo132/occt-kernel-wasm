@@ -193,9 +193,60 @@ export interface BoundingBox {
 // Import / export
 // ---------------------------------------------------------------------------
 
+export type StepImportReadStatus =
+    | 'IFSelect_RetVoid'
+    | 'IFSelect_RetDone'
+    | 'IFSelect_RetError'
+    | 'IFSelect_RetFail'
+    | 'IFSelect_RetStop';
+
+export type StepImportTransferStatus =
+    | 'NOT_RUN'
+    | 'DONE'
+    | 'PARTIAL'
+    | 'EMPTY'
+    | 'FAILED';
+
+export type StepImportMessagePhase = 'load' | 'transfer' | 'heal' | 'validation';
+export type StepImportMessageSeverity = 'info' | 'warning' | 'fail';
+
+export interface StepImportMessage {
+    readonly phase: StepImportMessagePhase;
+    readonly severity: StepImportMessageSeverity;
+    readonly text: string;
+    readonly entityNumber?: number;
+}
+
+export interface StepImportOptions {
+    /** Enable the broad OCCT ShapeFix pass after translation. */
+    readonly heal?: boolean;
+    /** Sew imported shells before applying ShapeFix. */
+    readonly sew?: boolean;
+    /** Force SameParameter fixing on imported edges. */
+    readonly fixSameParameter?: boolean;
+    /** Run solid-fix logic on the imported result. */
+    readonly fixSolid?: boolean;
+    /** Sewing tolerance used when `sew` is enabled. */
+    readonly sewingTolerance?: number;
+}
+
+export interface ImportStepDetailedResult {
+    readonly readStatus: StepImportReadStatus;
+    readonly transferStatus: StepImportTransferStatus;
+    readonly rootCount: number;
+    readonly transferredRootCount: number;
+    readonly messageList: readonly StepImportMessage[];
+    readonly shape?: ShapeHandle;
+    readonly isValid: boolean;
+    readonly wasValidBeforeHealing: boolean;
+    readonly healed: boolean;
+}
+
 export interface ImportStepParams {
     /** Raw content of a STEP file as a UTF-8 string. */
     readonly content: string;
+    /** Optional post-processing controls for healing imported geometry. */
+    readonly options?: StepImportOptions;
 }
 
 export interface ExportStepParams {

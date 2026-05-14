@@ -28,10 +28,15 @@ import type {
     ExportStepParams,
     ExtrudeParams,
     FilletParams,
+    ImportStepDetailedResult,
     ImportStepParams,
     RevolveParams,
     ShapeHandle,
     SphereParams,
+    StepImportMessage,
+    StepImportOptions,
+    StepImportReadStatus,
+    StepImportTransferStatus,
     TessellateParams,
     TessellationResult,
     TopologyResult,
@@ -60,6 +65,14 @@ export interface NativeKernel {
     checkValidity(id: number): boolean;
     tessellate(id: number, linearDeflection: number, angularDeflection: number): string;
     importStep(content: string): number;
+    importStepDetailed(
+        content: string,
+        heal: boolean,
+        sew: boolean,
+        fixSameParameter: boolean,
+        fixSolid: boolean,
+        sewingTolerance: number,
+    ): string;
     exportStep(id: number): string;
     disposeShape(id: number): void;
 }
@@ -125,6 +138,69 @@ interface RawTopology {
     vertexCount: number;
     boundingBox: BoundingBox;
     isValid: boolean;
+}
+
+interface RawStepImportMessage extends StepImportMessage {}
+
+interface RawStepImportDetailedResult {
+    readStatus: StepImportReadStatus;
+    transferStatus: StepImportTransferStatus;
+    rootCount: number;
+    transferredRootCount: number;
+    messageList: RawStepImportMessage[];
+    shapeId?: number;
+    isValid: boolean;
+    wasValidBeforeHealing: boolean;
+    healed: boolean;
+}
+
+interface NormalizedStepImportOptions {
+    heal: boolean;
+    sew: boolean;
+    fixSameParameter: boolean;
+    fixSolid: boolean;
+    sewingTolerance: number;
+}
+
+function normalizeImportOptions(options?: StepImportOptions): NormalizedStepImportOptions {
+    const sewingTolerance = options?.sewingTolerance ?? 1e-6;
+    requirePositive(sewingTolerance, 'sewingTolerance');
+
+    return {
+        heal: options?.heal ?? false,
+        sew: options?.sew ?? false,
+        fixSameParameter: options?.fixSameParameter ?? false,
+        fixSolid: options?.fixSolid ?? false,
+        sewingTolerance,
+    };
+}
+
+function formatImportFailure(result: ImportStepDetailedResult): string {
+    const firstFailure = result.messageList.find((message) => message.severity === 'fail');
+    if (firstFailure) {
+        return firstFailure.text;
+    }
+
+    const firstWarning = result.messageList.find((message) => message.severity === 'warning');
+    if (firstWarning) {
+        return firstWarning.text;
+    }
+
+    return `STEP import failed (${result.readStatus}/${result.transferStatus})`;
+}
+
+function toImportStepDetailedResult(raw: RawStepImportDetailedResult): ImportStepDetailedResult {
+    return {
+        readStatus: raw.readStatus,
+        transferStatus: raw.transferStatus,
+        rootCount: raw.rootCount,
+        transferredRootCount: raw.transferredRootCount,
+        messageList: raw.messageList,
+        ...(raw.shapeId !== undefined ? { shape: makeHandle(raw.shapeId) } : {}),
+        isValid: raw.isValid,
+        wasValidBeforeHealing: raw.wasValidBeforeHealing,
+        healed: raw.healed,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -297,10 +373,39 @@ export class OcctKernel {
      * Throws {@link KernelError} with code `IMPORT_FAILED` on parse errors.
      */
     importStep(params: ImportStepParams): ShapeHandle {
-        if (typeof params.content !== 'string' || params.content.trim().length === 0) {
-            throw new KernelError('IMPORT_FAILED', 'STEP content must be a non-empty string');
+        if (typeof params.content !== 'string') {
+            throw new KernelError('INVALID_PARAMS', 'STEP content must be a string');
         }
-        return makeHandle(wrap(() => this._native.importStep(params.content)));
+
+        const result = this.importStepDetailed(params);
+        if (!result.shape) {
+            throw new KernelError('IMPORT_FAILED', formatImportFailure(result));
+        }
+        return result.shape;
+    }
+
+    /**
+     * Import a STEP file and return reader, transfer, and validity diagnostics.
+     *
+     * Unlike {@link importStep}, this method does not throw on STEP parse or
+     * transfer failures; those are returned in the structured result.
+     */
+    importStepDetailed(params: ImportStepParams): ImportStepDetailedResult {
+        if (typeof params.content !== 'string') {
+            throw new KernelError('INVALID_PARAMS', 'STEP content must be a string');
+        }
+
+        const options = normalizeImportOptions(params.options);
+        const raw = wrap(() => this._native.importStepDetailed(
+            params.content,
+            options.heal,
+            options.sew,
+            options.fixSameParameter,
+            options.fixSolid,
+            options.sewingTolerance,
+        ));
+
+        return toImportStepDetailedResult(parseJson<RawStepImportDetailedResult>(raw, 'STEP import'));
     }
 
     /**

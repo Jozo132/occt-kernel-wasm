@@ -46,6 +46,7 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
 
         // Import / export
         .function("importStep", &OcctKernel::importStep)
+        .function("importStepDetailed", &OcctKernel::importStepDetailed)
         .function("exportStep", &OcctKernel::exportStep)
 
         // Memory

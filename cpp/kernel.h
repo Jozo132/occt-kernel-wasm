@@ -115,6 +115,14 @@ public:
     /// Parse a STEP file supplied as a UTF-8 string.  Returns a new handle.
     uint32_t importStep(const std::string& content);
 
+    /// Parse a STEP file and return structured reader / transfer diagnostics as JSON.
+    std::string importStepDetailed(const std::string& content,
+                                   bool heal,
+                                   bool sew,
+                                   bool fixSameParameter,
+                                   bool fixSolid,
+                                   double sewingTolerance);
+
     /// Write the shape to STEP format and return the file content as a string.
     std::string exportStep(uint32_t id);
 

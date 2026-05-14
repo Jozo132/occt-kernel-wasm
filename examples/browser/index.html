@@ -55,9 +55,8 @@
     <!--
         In production, replace the mock module import with:
         <script type="module">
-            import createModule from './dist/occt-kernel.js';
-            const wasmModule = await createModule();
-            ...
+            import { createKernel } from './dist/index.mjs';
+            const kernel = await createKernel();
         </script>
     -->
 

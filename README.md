@@ -142,6 +142,21 @@ const stepContent = kernel.exportStep({ shape: box });
 
 // Import
 const imported = kernel.importStep({ content: stepContent });
+
+// Structured import diagnostics
+const detailedImport = kernel.importStepDetailed({
+    content: stepContent,
+    options: {
+        heal: true,
+        sew: true,
+        fixSameParameter: true,
+    },
+});
+
+if (!detailedImport.shape) {
+    console.error(detailedImport.readStatus, detailedImport.transferStatus);
+    console.table(detailedImport.messageList);
+}
 ```
 
 ### Memory management
@@ -177,15 +192,26 @@ Error codes: `INVALID_HANDLE` | `INVALID_PARAMS` | `OPERATION_FAILED` | `IMPORT_
 
 ```html
 <script type="module">
-    import createModule from './dist/occt-kernel.js';
-    import { OcctKernel } from './dist/index.mjs';
+    import { createKernel } from './dist/index.mjs';
 
-    const wasmModule = await createModule();
-    const kernel = new OcctKernel(wasmModule);
+    const kernel = await createKernel();
 
     const box = kernel.createBox({ dx: 10, dy: 10, dz: 10 });
     const mesh = kernel.tessellate({ shape: box });
     // Use mesh.positions, mesh.normals, mesh.indices with WebGL/Three.js
+    kernel.disposeShape({ shape: box });
+</script>
+```
+
+CDN example:
+
+```html
+<script type="module">
+    import { createKernel } from 'https://cdn.jsdelivr.net/npm/occt-kernel-wasm@VERSION/dist/index.mjs';
+
+    const kernel = await createKernel();
+    const box = kernel.createBox({ dx: 10, dy: 10, dz: 10 });
+    console.log(kernel.getTopology(box));
     kernel.disposeShape({ shape: box });
 </script>
 ```
@@ -197,12 +223,10 @@ See [`examples/browser/index.html`](examples/browser/index.html) for a complete 
 ## Node.js Usage
 
 ```js
-const createModule = require('./dist/occt-kernel.js');
-const { OcctKernel } = require('occt-kernel-wasm');
+const { createKernel } = require('occt-kernel-wasm');
 
 async function main() {
-    const wasmModule = await createModule();
-    const kernel = new OcctKernel(wasmModule);
+    const kernel = await createKernel();
 
     const box = kernel.createBox({ dx: 10, dy: 10, dz: 10 });
     const step = kernel.exportStep({ shape: box });
@@ -239,11 +263,11 @@ bash scripts/build-occt.sh
 # 3. Build the WASM module
 bash scripts/build-wasm.sh
 
-# 4. Build TypeScript
+# 4. Build the publishable dist/
 npm run build
 ```
 
-Output: `dist/occt-kernel.js`, `dist/occt-kernel.wasm`, `dist/index.js`, `dist/index.d.ts`
+Output: `dist/occt-kernel.js`, `dist/occt-kernel.wasm`, `dist/index.js`, `dist/index.mjs`, `dist/index.d.ts`
 
 ---
 
