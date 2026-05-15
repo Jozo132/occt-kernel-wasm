@@ -36,6 +36,7 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         // Modifiers
         .function("filletEdges",  &OcctKernel::filletEdges)
         .function("chamferEdges", &OcctKernel::chamferEdges)
+        .function("transformShape", &OcctKernel::transformShape)
 
         // Queries
         .function("getTopology",    &OcctKernel::getTopology)

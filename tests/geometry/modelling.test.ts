@@ -138,6 +138,30 @@ describe('extrudeProfile flow', () => {
         expect(solid.id).toBeGreaterThan(0);
     });
 
+    it('extrudes a profile with holes in a custom plane', () => {
+        const k = makeKernel();
+        const solid = k.extrudeProfile({
+            profile: {
+                outer: rectangleProfile,
+                holes: [{
+                    segments: [
+                        { type: 'line' as const, start: [5, 2] as [number,number], end: [15, 2] as [number,number] },
+                        { type: 'line' as const, start: [15, 2] as [number,number], end: [15, 8] as [number,number] },
+                        { type: 'line' as const, start: [15, 8] as [number,number], end: [5, 8] as [number,number] },
+                        { type: 'line' as const, start: [5, 8] as [number,number], end: [5, 2] as [number,number] },
+                    ],
+                }],
+            },
+            plane: {
+                origin: [0, 0, 10],
+                normal: [0, 1, 0],
+                xDirection: [1, 0, 0],
+            },
+            height: 15,
+        });
+        expect(solid.id).toBeGreaterThan(0);
+    });
+
     it('tessellates an extruded profile', () => {
         const k = makeKernel();
         const solid = k.extrudeProfile({ profile: rectangleProfile, height: 15 });
@@ -151,6 +175,24 @@ describe('extrudeProfile flow', () => {
         const cyl = k.createCylinder({ radius: 4, height: 20 });
         const result = k.booleanSubtract({ base: outer, tool: cyl });
         expect(result.id).toBeGreaterThan(0);
+    });
+
+    it('can transform an extruded profile before tessellation', () => {
+        const k = makeKernel();
+        const solid = k.extrudeProfile({ profile: rectangleProfile, vector: [0, 0, 12] });
+        const moved = k.transformShape({
+            shape: solid,
+            transform: {
+                rotation: {
+                    axisOrigin: [0, 0, 0],
+                    axisDirection: [0, 0, 1],
+                    angleDegrees: 30,
+                },
+                translation: [5, 0, 0],
+            },
+        });
+        const mesh = k.tessellate({ shape: moved });
+        expect(mesh.positions.length).toBeGreaterThan(0);
     });
 });
 

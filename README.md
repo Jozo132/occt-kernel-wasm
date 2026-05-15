@@ -66,17 +66,55 @@ const sph = kernel.createSphere({ radius: 20 });
 
 ```ts
 const profile = {
-    segments: [
-        { type: 'line', start: [0, 0], end: [20, 0] },
-        { type: 'line', start: [20, 0], end: [20, 10] },
-        { type: 'line', start: [20, 10], end: [0, 10] },
-        { type: 'line', start: [0, 10], end: [0, 0] },
-    ],
+    outer: {
+        segments: [
+            { type: 'line', start: [0, 0], end: [20, 0] },
+            { type: 'line', start: [20, 0], end: [20, 10] },
+            { type: 'line', start: [20, 10], end: [0, 10] },
+            { type: 'line', start: [0, 10], end: [0, 0] },
+        ],
+    },
+    holes: [{
+        segments: [
+            { type: 'line', start: [6, 3], end: [14, 3] },
+            { type: 'line', start: [14, 3], end: [14, 7] },
+            { type: 'line', start: [14, 7], end: [6, 7] },
+            { type: 'line', start: [6, 7], end: [6, 3] },
+        ],
+    }],
 };
 
-const extruded = kernel.extrudeProfile({ profile, height: 15 });
-const revolved = kernel.revolveProfile({ profile, angleDegrees: 360 });
+const extruded = kernel.extrudeProfile({
+    profile,
+    plane: {
+        origin: [0, 0, 10],
+        normal: [0, 1, 0],
+        xDirection: [1, 0, 0],
+    },
+    height: 15,
+});
+
+const revolved = kernel.revolveProfile({
+    profile,
+    axisOrigin: [0, 0, 0],
+    axisDirection: [0, 0, 1],
+    angleDegrees: 360,
+});
+
+const moved = kernel.transformShape({
+    shape: extruded,
+    transform: {
+        rotation: {
+            axisOrigin: [0, 0, 0],
+            axisDirection: [0, 0, 1],
+            angleDegrees: 30,
+        },
+        translation: [25, 0, 0],
+    },
+});
 ```
+
+Legacy single-wire profiles using `{ segments: [...] }` are still supported. `extrudeProfile` accepts either `height` or an explicit world-space `vector`.
 
 Arc segments:
 ```ts
@@ -257,15 +295,17 @@ See [`examples/nodejs/demo.js`](examples/nodejs/demo.js) for a complete demo.
 # 1. Install Node.js dependencies
 npm install
 
-# 2. Build OCCT for Emscripten (downloads and builds OCCT)
-bash scripts/build-occt.sh
+# 2. Build OCCT for Emscripten (dispatches to PowerShell on Windows)
+npm run build:occt
 
 # 3. Build the WASM module
-bash scripts/build-wasm.sh
+npm run build:wasm
 
 # 4. Build the publishable dist/
 npm run build
 ```
+
+On Windows, `npm run build:occt` and `npm run build:wasm` use the PowerShell wrappers in `scripts/` so the local Emscripten `.bat` entrypoints are used directly.
 
 Output: `dist/occt-kernel.js`, `dist/occt-kernel.wasm`, `dist/index.js`, `dist/index.mjs`, `dist/index.d.ts`
 

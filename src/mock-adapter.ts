@@ -40,6 +40,35 @@ interface MockImportResult {
     healed: boolean;
 }
 
+interface MockProfileWire {
+    segments: unknown[];
+}
+
+interface MockProfile {
+    wires: MockProfileWire[];
+}
+
+interface MockRotationTransform {
+    axisOrigin: [number, number, number];
+    axisDirection: [number, number, number];
+    angleDegrees: number;
+}
+
+interface MockShapeTransform {
+    translation?: [number, number, number];
+    rotation?: MockRotationTransform;
+}
+
+function isPoint(value: unknown, length: 2 | 3): value is number[] {
+    return Array.isArray(value)
+        && value.length === length
+        && value.every((entry) => typeof entry === 'number' && Number.isFinite(entry));
+}
+
+function isZeroVector(value: readonly number[]): boolean {
+    return value.every((entry) => entry === 0);
+}
+
 // ---------------------------------------------------------------------------
 // Mock native kernel class
 // ---------------------------------------------------------------------------
@@ -85,22 +114,102 @@ export class MockNativeKernel {
         return this._store('sphere', { radius });
     }
 
-    // -- Sketch-based features --
-
-    extrudeProfile(profileJson: string, height: number): number {
-        if (height <= 0) {
-            throw new KernelError('INVALID_PARAMS', 'Extrusion height must be > 0');
+    private _parseProfile(profileJson: string): MockProfile {
+        const profile = JSON.parse(profileJson) as Partial<MockProfile>;
+        if (!Array.isArray(profile.wires) || profile.wires.length === 0) {
+            throw new KernelError('INVALID_PARAMS', 'Profile must include at least one wire');
         }
-        JSON.parse(profileJson); // validate JSON
-        return this._store('extrude', { profileJson, height });
+        for (const [wireIndex, wire] of profile.wires.entries()) {
+            if (!wire || !Array.isArray(wire.segments) || wire.segments.length === 0) {
+                throw new KernelError('INVALID_PARAMS', `Profile wire ${wireIndex} must include segments`);
+            }
+        }
+        return profile as MockProfile;
     }
 
-    revolveProfile(profileJson: string, angleDegrees: number): number {
-        if (angleDegrees <= 0 || angleDegrees > 360) {
+    private _parseExtrudeOptions(optionsJson: string): Record<string, unknown> {
+        const options = JSON.parse(optionsJson) as Record<string, unknown>;
+        const hasHeight = typeof options.height === 'number';
+        const hasVector = isPoint(options.vector, 3);
+
+        if (hasHeight === hasVector) {
+            throw new KernelError('INVALID_PARAMS', "Extrude options must specify exactly one of 'height' or 'vector'");
+        }
+        if (hasHeight && (options.height as number) <= 0) {
+            throw new KernelError('INVALID_PARAMS', 'Extrusion height must be > 0');
+        }
+        if (hasVector && isZeroVector(options.vector as number[])) {
+            throw new KernelError('INVALID_PARAMS', 'Extrusion vector must not be the zero vector');
+        }
+
+        if (options.plane !== undefined) {
+            const plane = options.plane as Record<string, unknown>;
+            if (!isPoint(plane.origin, 3) || !isPoint(plane.normal, 3) || !isPoint(plane.xDirection, 3)) {
+                throw new KernelError('INVALID_PARAMS', 'Plane must include origin, normal, and xDirection');
+            }
+            if (isZeroVector(plane.normal as number[]) || isZeroVector(plane.xDirection as number[])) {
+                throw new KernelError('INVALID_PARAMS', 'Plane vectors must not be zero');
+            }
+        }
+
+        return options;
+    }
+
+    private _parseRevolveOptions(optionsJson: string): Record<string, unknown> {
+        const options = JSON.parse(optionsJson) as Record<string, unknown>;
+        if (typeof options.angleDegrees !== 'number' || options.angleDegrees <= 0 || options.angleDegrees > 360) {
             throw new KernelError('INVALID_PARAMS', 'Revolution angle must be in (0, 360]');
         }
-        JSON.parse(profileJson);
-        return this._store('revolve', { profileJson, angleDegrees });
+        if (options.axisOrigin !== undefined && !isPoint(options.axisOrigin, 3)) {
+            throw new KernelError('INVALID_PARAMS', 'axisOrigin must be a 3-element array');
+        }
+        if (options.axisDirection !== undefined) {
+            if (!isPoint(options.axisDirection, 3)) {
+                throw new KernelError('INVALID_PARAMS', 'axisDirection must be a 3-element array');
+            }
+            if (isZeroVector(options.axisDirection as number[])) {
+                throw new KernelError('INVALID_PARAMS', 'axisDirection must not be the zero vector');
+            }
+        }
+        return options;
+    }
+
+    private _parseShapeTransform(transformJson: string): MockShapeTransform {
+        const transform = JSON.parse(transformJson) as MockShapeTransform;
+        if (transform.translation !== undefined) {
+            if (!isPoint(transform.translation, 3)) {
+                throw new KernelError('INVALID_PARAMS', 'translation must be a 3-element array');
+            }
+        }
+        if (transform.rotation !== undefined) {
+            if (!isPoint(transform.rotation.axisOrigin, 3) || !isPoint(transform.rotation.axisDirection, 3)) {
+                throw new KernelError('INVALID_PARAMS', 'rotation axis must be defined by 3-element arrays');
+            }
+            if (isZeroVector(transform.rotation.axisDirection)) {
+                throw new KernelError('INVALID_PARAMS', 'rotation axisDirection must not be the zero vector');
+            }
+            if (typeof transform.rotation.angleDegrees !== 'number' || !Number.isFinite(transform.rotation.angleDegrees)) {
+                throw new KernelError('INVALID_PARAMS', 'rotation angleDegrees must be finite');
+            }
+        }
+        if (transform.translation === undefined && transform.rotation === undefined) {
+            throw new KernelError('INVALID_PARAMS', 'Transform must specify translation and/or rotation');
+        }
+        return transform;
+    }
+
+    // -- Sketch-based features --
+
+    extrudeProfile(profileJson: string, optionsJson: string): number {
+        const profile = this._parseProfile(profileJson);
+        const options = this._parseExtrudeOptions(optionsJson);
+        return this._store('extrude', { profile, options });
+    }
+
+    revolveProfile(profileJson: string, optionsJson: string): number {
+        const profile = this._parseProfile(profileJson);
+        const options = this._parseRevolveOptions(optionsJson);
+        return this._store('revolve', { profile, options });
     }
 
     // -- Booleans --
@@ -139,6 +248,12 @@ export class MockNativeKernel {
             throw new KernelError('INVALID_PARAMS', 'Chamfer distance must be > 0');
         }
         return this._store('chamfer', { id, distance });
+    }
+
+    transformShape(id: number, transformJson: string): number {
+        this._require(id);
+        const transform = this._parseShapeTransform(transformJson);
+        return this._store('transform', { id, transform });
     }
 
     // -- Queries --

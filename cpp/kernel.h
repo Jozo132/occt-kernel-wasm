@@ -55,18 +55,18 @@ public:
     // -----------------------------------------------------------------------
 
     /**
-     * Extrude a 2-D profile by `height` units along +Z.
-     * @param profileJson  JSON serialisation of a ::Profile struct.
-     * @param height       Extrusion length (must be > 0).
+     * Extrude a 2-D profile using JSON options for placement and direction.
+     * @param profileJson  JSON serialisation of a profile struct.
+     * @param optionsJson  JSON serialisation of the extrusion options.
      */
-    uint32_t extrudeProfile(const std::string& profileJson, double height);
+    uint32_t extrudeProfile(const std::string& profileJson, const std::string& optionsJson);
 
     /**
-     * Revolve a 2-D profile about the Y axis.
-     * @param profileJson    JSON serialisation of a ::Profile struct.
-     * @param angleDegrees   Revolution angle in degrees (0 < angle ≤ 360).
+     * Revolve a 2-D profile about an arbitrary world-space axis.
+     * @param profileJson    JSON serialisation of a profile struct.
+     * @param optionsJson    JSON serialisation of the revolve options.
      */
-    uint32_t revolveProfile(const std::string& profileJson, double angleDegrees);
+    uint32_t revolveProfile(const std::string& profileJson, const std::string& optionsJson);
 
     // -----------------------------------------------------------------------
     // Boolean operations
@@ -85,6 +85,9 @@ public:
 
     /// Chamfer all edges of the shape with a constant distance.
     uint32_t chamferEdges(uint32_t id, double distance);
+
+    /// Apply a world-space transform to an existing resident shape.
+    uint32_t transformShape(uint32_t id, const std::string& transformJson);
 
     // -----------------------------------------------------------------------
     // Queries

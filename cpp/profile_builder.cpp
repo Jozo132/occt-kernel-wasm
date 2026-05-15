@@ -11,6 +11,7 @@
  */
 
 #include "profile_builder.h"
+#include "json_utils.h"
 
 // OCCT geometry
 #include <gp_Pnt2d.hxx>
@@ -18,6 +19,7 @@
 #include <gp_Circ.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 
 // OCCT topology builders
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -27,10 +29,10 @@
 #include <GCE2d_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <cmath>
 
 #ifndef M_PI
 #  define M_PI 3.14159265358979323846
@@ -39,186 +41,98 @@
 namespace occt_kernel {
 
 // ---------------------------------------------------------------------------
-// Minimal JSON value type
-// ---------------------------------------------------------------------------
-
-struct JsonValue;
-using JsonArray  = std::vector<JsonValue>;
-using JsonObject = std::vector<std::pair<std::string, JsonValue>>;
-
-struct JsonValue {
-    enum class Kind { Null, Bool, Number, String, Array, Object } kind = Kind::Null;
-    bool        b  = false;
-    double      n  = 0.0;
-    std::string s;
-    JsonArray   arr;
-    JsonObject  obj;
-
-    static JsonValue makeNull()   { JsonValue v; v.kind = Kind::Null;   return v; }
-    static JsonValue makeBool(bool x) { JsonValue v; v.kind = Kind::Bool; v.b = x; return v; }
-    static JsonValue makeNum(double x) { JsonValue v; v.kind = Kind::Number; v.n = x; return v; }
-    static JsonValue makeStr(const std::string& x) { JsonValue v; v.kind = Kind::String; v.s = x; return v; }
-    static JsonValue makeArr() { JsonValue v; v.kind = Kind::Array; return v; }
-    static JsonValue makeObj() { JsonValue v; v.kind = Kind::Object; return v; }
-
-    const JsonValue* get(const std::string& key) const {
-        for (auto& kv : obj) {
-            if (kv.first == key) return &kv.second;
-        }
-        return nullptr;
-    }
-
-    double getNum(const std::string& key) const {
-        const JsonValue* v = get(key);
-        if (!v || v->kind != Kind::Number) {
-            throw std::runtime_error("Missing or non-numeric key: " + key);
-        }
-        return v->n;
-    }
-
-    std::pair<double,double> getXY(const std::string& key) const {
-        const JsonValue* v = get(key);
-        if (!v || v->kind != Kind::Array || v->arr.size() < 2) {
-            throw std::runtime_error("Expected 2-element array for key: " + key);
-        }
-        return { v->arr[0].n, v->arr[1].n };
-    }
-
-    std::string getStr(const std::string& key) const {
-        const JsonValue* v = get(key);
-        if (!v || v->kind != Kind::String) {
-            throw std::runtime_error("Missing or non-string key: " + key);
-        }
-        return v->s;
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Minimal JSON parser
-// ---------------------------------------------------------------------------
-
-struct Parser {
-    const char* p;
-    const char* end;
-
-    explicit Parser(const std::string& s) : p(s.data()), end(s.data() + s.size()) {}
-
-    void skipWs() {
-        while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) ++p;
-    }
-
-    char peek() { skipWs(); return p < end ? *p : '\0'; }
-    char consume() { return p < end ? *p++ : '\0'; }
-
-    JsonValue parse() {
-        char c = peek();
-        if (c == '{') return parseObject();
-        if (c == '[') return parseArray();
-        if (c == '"') return parseString();
-        if (c == 't' || c == 'f') return parseBool();
-        if (c == 'n') { p += 4; return JsonValue::makeNull(); }
-        return parseNumber();
-    }
-
-    JsonValue parseObject() {
-        consume(); // '{'
-        JsonValue v = JsonValue::makeObj();
-        skipWs();
-        if (peek() == '}') { consume(); return v; }
-        while (true) {
-            skipWs();
-            if (peek() != '"') throw std::runtime_error("Expected string key in JSON object");
-            std::string key = parseString().s;
-            skipWs();
-            if (consume() != ':') throw std::runtime_error("Expected ':' in JSON object");
-            JsonValue val = parse();
-            v.obj.push_back({ key, val });
-            skipWs();
-            char next = consume();
-            if (next == '}') break;
-            if (next != ',') throw std::runtime_error("Expected ',' or '}' in JSON object");
-        }
-        return v;
-    }
-
-    JsonValue parseArray() {
-        consume(); // '['
-        JsonValue v = JsonValue::makeArr();
-        skipWs();
-        if (peek() == ']') { consume(); return v; }
-        while (true) {
-            v.arr.push_back(parse());
-            skipWs();
-            char next = consume();
-            if (next == ']') break;
-            if (next != ',') throw std::runtime_error("Expected ',' or ']' in JSON array");
-        }
-        return v;
-    }
-
-    JsonValue parseString() {
-        consume(); // '"'
-        std::string s;
-        while (p < end && *p != '"') {
-            if (*p == '\\') { ++p; if (p < end) s += *p++; }
-            else s += *p++;
-        }
-        consume(); // closing '"'
-        return JsonValue::makeStr(s);
-    }
-
-    JsonValue parseBool() {
-        bool val = (*p == 't');
-        p += val ? 4 : 5;
-        return JsonValue::makeBool(val);
-    }
-
-    JsonValue parseNumber() {
-        char* end_ptr = nullptr;
-        double val = std::strtod(p, &end_ptr);
-        if (!end_ptr || end_ptr == p) throw std::runtime_error("Invalid JSON number");
-        p = end_ptr;
-        return JsonValue::makeNum(val);
-    }
-};
-
-// ---------------------------------------------------------------------------
 // Profile → wire
 // ---------------------------------------------------------------------------
 
-TopoDS_Wire buildWireFromProfile(const std::string& profileJson) {
-    Parser parser(profileJson);
-    JsonValue root = parser.parse();
+namespace {
 
-    const JsonValue* segsVal = root.get("segments");
-    if (!segsVal || segsVal->kind != JsonValue::Kind::Array) {
-        throw std::runtime_error("Profile JSON must contain a 'segments' array");
+using mini_json::Value;
+
+struct BuiltWire {
+    TopoDS_Wire wire;
+    double signedArea = 0.0;
+    bool hasSignedArea = false;
+    bool isCircleWire = false;
+};
+
+double computeSignedArea(const std::vector<std::pair<double, double>>& points)
+{
+    if (points.size() < 3) {
+        return 0.0;
+    }
+
+    double twiceArea = 0.0;
+    for (std::size_t index = 0; index < points.size(); ++index) {
+        const auto& current = points[index];
+        const auto& next = points[(index + 1) % points.size()];
+        twiceArea += (current.first * next.second) - (next.first * current.second);
+    }
+    return 0.5 * twiceArea;
+}
+
+void appendPoint(std::vector<std::pair<double, double>>& points, double x, double y)
+{
+    if (!points.empty() && points.back().first == x && points.back().second == y) {
+        return;
+    }
+    points.push_back({ x, y });
+}
+
+BuiltWire buildWireFromSegments(const Value& segmentsValue, const std::string& context)
+{
+    const Value& segments = mini_json::requireArray(segmentsValue, context);
+    if (segments.array.empty()) {
+        throw std::runtime_error("Profile wire must contain at least one segment");
     }
 
     BRepBuilderAPI_MakeWire mkWire;
+    std::vector<std::pair<double, double>> sampledPoints;
+    bool isCircleWire = segments.array.size() == 1;
 
-    for (const JsonValue& seg : segsVal->arr) {
-        std::string type = seg.getStr("type");
+    for (std::size_t index = 0; index < segments.array.size(); ++index) {
+        const Value& segment = mini_json::requireObject(segments.array[index], context + "[" + std::to_string(index) + "]");
+        const std::string type = mini_json::requireString(mini_json::requireMember(segment, "type", context), context + ".type");
 
         if (type == "line") {
-            auto [sx, sy] = seg.getXY("start");
-            auto [ex, ey] = seg.getXY("end");
+            const auto start = mini_json::requirePoint2(mini_json::requireMember(segment, "start", context), context + ".start");
+            const auto end = mini_json::requirePoint2(mini_json::requireMember(segment, "end", context), context + ".end");
+            const double sx = start[0];
+            const double sy = start[1];
+            const double ex = end[0];
+            const double ey = end[1];
+            appendPoint(sampledPoints, sx, sy);
+            appendPoint(sampledPoints, ex, ey);
             gp_Pnt p1(sx, sy, 0), p2(ex, ey, 0);
             BRepBuilderAPI_MakeEdge mkEdge(p1, p2);
             if (!mkEdge.IsDone()) throw std::runtime_error("Failed to build line edge");
             mkWire.Add(mkEdge.Edge());
         } else if (type == "arc") {
-            auto [sx, sy]  = seg.getXY("start");
-            auto [mx, my]  = seg.getXY("mid");
-            auto [ex, ey]  = seg.getXY("end");
+            const auto start = mini_json::requirePoint2(mini_json::requireMember(segment, "start", context), context + ".start");
+            const auto mid = mini_json::requirePoint2(mini_json::requireMember(segment, "mid", context), context + ".mid");
+            const auto end = mini_json::requirePoint2(mini_json::requireMember(segment, "end", context), context + ".end");
+            const double sx = start[0];
+            const double sy = start[1];
+            const double mx = mid[0];
+            const double my = mid[1];
+            const double ex = end[0];
+            const double ey = end[1];
+            appendPoint(sampledPoints, sx, sy);
+            appendPoint(sampledPoints, mx, my);
+            appendPoint(sampledPoints, ex, ey);
             gp_Pnt p1(sx, sy, 0), pm(mx, my, 0), p2(ex, ey, 0);
             Handle(Geom_TrimmedCurve) arc = GC_MakeArcOfCircle(p1, pm, p2);
             BRepBuilderAPI_MakeEdge mkEdge(arc);
             if (!mkEdge.IsDone()) throw std::runtime_error("Failed to build arc edge");
             mkWire.Add(mkEdge.Edge());
         } else if (type == "circle") {
-            auto [cx, cy] = seg.getXY("centre");
-            double r = seg.getNum("radius");
+            const auto centre = mini_json::requirePoint2(mini_json::requireMember(segment, "centre", context), context + ".centre");
+            const double cx = centre[0];
+            const double cy = centre[1];
+            const double r = mini_json::requireNumber(mini_json::requireMember(segment, "radius", context), context + ".radius");
+            appendPoint(sampledPoints, cx + r, cy);
+            appendPoint(sampledPoints, cx, cy + r);
+            appendPoint(sampledPoints, cx - r, cy);
+            appendPoint(sampledPoints, cx, cy - r);
             gp_Ax2 ax(gp_Pnt(cx, cy, 0), gp_Dir(0, 0, 1));
             gp_Circ circ(ax, r);
             BRepBuilderAPI_MakeEdge mkEdge(circ);
@@ -232,15 +146,93 @@ TopoDS_Wire buildWireFromProfile(const std::string& profileJson) {
     if (!mkWire.IsDone()) {
         throw std::runtime_error("Failed to build wire from profile (wire not closed or edges not connected)");
     }
-    return mkWire.Wire();
+
+    BuiltWire result;
+    result.wire = mkWire.Wire();
+    result.signedArea = computeSignedArea(sampledPoints);
+    result.hasSignedArea = std::abs(result.signedArea) > 1.0e-9;
+    result.isCircleWire = isCircleWire;
+    return result;
 }
 
-TopoDS_Face buildFaceFromProfile(const std::string& profileJson) {
-    TopoDS_Wire wire = buildWireFromProfile(profileJson);
-    BRepBuilderAPI_MakeFace mkFace(wire, Standard_True);
-    if (!mkFace.IsDone()) {
-        throw std::runtime_error("Failed to build planar face from profile wire");
+BuiltWire buildWireFromWireValue(const Value& wireValue, const std::string& context)
+{
+    if (wireValue.kind == Value::Kind::Array) {
+        return buildWireFromSegments(wireValue, context);
     }
+    const Value& wireObject = mini_json::requireObject(wireValue, context);
+    return buildWireFromSegments(mini_json::requireMember(wireObject, "segments", context), context + ".segments");
+}
+
+std::vector<BuiltWire> buildWiresFromProfileValue(const Value& root)
+{
+    std::vector<BuiltWire> wires;
+
+    if (const Value* wiresValue = root.get("wires")) {
+        const Value& wiresArray = mini_json::requireArray(*wiresValue, "profile.wires");
+        if (wiresArray.array.empty()) {
+            throw std::runtime_error("Profile must contain at least one wire");
+        }
+        for (std::size_t index = 0; index < wiresArray.array.size(); ++index) {
+            wires.push_back(buildWireFromWireValue(wiresArray.array[index], "profile.wires[" + std::to_string(index) + "]"));
+        }
+        return wires;
+    }
+
+    if (const Value* outerValue = root.get("outer")) {
+        wires.push_back(buildWireFromWireValue(*outerValue, "profile.outer"));
+        if (const Value* holesValue = root.get("holes")) {
+            const Value& holesArray = mini_json::requireArray(*holesValue, "profile.holes");
+            for (std::size_t index = 0; index < holesArray.array.size(); ++index) {
+                wires.push_back(buildWireFromWireValue(holesArray.array[index], "profile.holes[" + std::to_string(index) + "]"));
+            }
+        }
+        return wires;
+    }
+
+    if (const Value* segmentsValue = root.get("segments")) {
+        wires.push_back(buildWireFromSegments(*segmentsValue, "profile.segments"));
+        return wires;
+    }
+
+    throw std::runtime_error("Profile JSON must contain 'segments', 'outer', or 'wires'");
+}
+
+} // namespace
+
+TopoDS_Wire buildWireFromProfile(const std::string& profileJson)
+{
+    const Value root = mini_json::parse(profileJson);
+    const std::vector<BuiltWire> wires = buildWiresFromProfileValue(root);
+    if (wires.empty()) {
+        throw std::runtime_error("Profile must contain at least one wire");
+    }
+    return wires.front().wire;
+}
+
+TopoDS_Face buildFaceFromProfile(const std::string& profileJson)
+{
+    const Value root = mini_json::parse(profileJson);
+    const std::vector<BuiltWire> wires = buildWiresFromProfileValue(root);
+    if (wires.empty()) {
+        throw std::runtime_error("Profile must contain at least one wire");
+    }
+
+    BRepBuilderAPI_MakeFace mkFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), wires.front().wire, Standard_True);
+    if (!mkFace.IsDone()) {
+        throw std::runtime_error("Failed to build planar face from outer wire");
+    }
+
+    for (std::size_t index = 1; index < wires.size(); ++index) {
+        TopoDS_Wire holeWire = wires[index].wire;
+        const bool needsReverse = wires[index].isCircleWire
+            || (wires.front().hasSignedArea && wires[index].hasSignedArea && (wires.front().signedArea * wires[index].signedArea) > 0.0);
+        if (needsReverse) {
+            holeWire.Reverse();
+        }
+        mkFace.Add(holeWire);
+    }
+
     return mkFace.Face();
 }
 

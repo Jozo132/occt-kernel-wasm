@@ -38,6 +38,10 @@ export interface SphereParams {
     readonly radius: number;
 }
 
+export type Point2 = readonly [number, number];
+export type Point3 = readonly [number, number, number];
+export type Vector3 = readonly [number, number, number];
+
 // ---------------------------------------------------------------------------
 // 2-D sketch profile
 // ---------------------------------------------------------------------------
@@ -45,25 +49,25 @@ export interface SphereParams {
 export type ProfileSegmentLine = {
     readonly type: 'line';
     /** Start point [x, y]. */
-    readonly start: readonly [number, number];
+    readonly start: Point2;
     /** End point   [x, y]. */
-    readonly end: readonly [number, number];
+    readonly end: Point2;
 };
 
 export type ProfileSegmentArc = {
     readonly type: 'arc';
     /** Start point [x, y]. */
-    readonly start: readonly [number, number];
+    readonly start: Point2;
     /** Mid-point   [x, y] – used to define the arc. */
-    readonly mid: readonly [number, number];
+    readonly mid: Point2;
     /** End point   [x, y]. */
-    readonly end: readonly [number, number];
+    readonly end: Point2;
 };
 
 export type ProfileSegmentCircle = {
     readonly type: 'circle';
     /** Centre [x, y]. */
-    readonly centre: readonly [number, number];
+    readonly centre: Point2;
     /** Radius. */
     readonly radius: number;
 };
@@ -73,12 +77,30 @@ export type ProfileSegment =
     | ProfileSegmentArc
     | ProfileSegmentCircle;
 
+export interface ProfileWire {
+    readonly segments: readonly ProfileSegment[];
+}
+
+export interface PlaneFrame {
+    /** World-space origin for the local sketch plane. */
+    readonly origin: Point3;
+    /** Plane normal, used as the local +Z direction. */
+    readonly normal: Vector3;
+    /** World-space direction for the local +X axis. */
+    readonly xDirection: Vector3;
+}
+
 /**
- * A closed 2-D profile defined in the XY plane.
- * The profile is built into an OCCT wire/face by the kernel.
+ * A closed 2-D profile defined in the local XY plane.
+ * The kernel accepts a legacy single-wire `segments` profile, an `outer` wire
+ * plus optional `holes`, or a canonical `wires` array where the first wire is
+ * treated as outer and any remaining wires are treated as holes.
  */
 export interface Profile {
-    readonly segments: readonly ProfileSegment[];
+    readonly segments?: readonly ProfileSegment[];
+    readonly outer?: ProfileWire;
+    readonly holes?: readonly ProfileWire[];
+    readonly wires?: readonly ProfileWire[];
 }
 
 // ---------------------------------------------------------------------------
@@ -88,8 +110,12 @@ export interface Profile {
 export interface ExtrudeParams {
     /** 2-D profile to extrude. */
     readonly profile: Profile;
-    /** Distance to extrude (positive = +Z direction). */
-    readonly height: number;
+    /** Optional sketch-plane placement for the local 2-D profile. */
+    readonly plane?: PlaneFrame;
+    /** Distance to extrude along local +Z / plane normal. */
+    readonly height?: number;
+    /** Explicit world-space extrusion vector. Mutually exclusive with `height`. */
+    readonly vector?: Vector3;
 }
 
 export interface RevolveParams {
@@ -100,6 +126,26 @@ export interface RevolveParams {
      * Use 360 for a full revolution.
      */
     readonly angleDegrees: number;
+    /** Optional world-space point on the revolve axis. Defaults to the origin. */
+    readonly axisOrigin?: Point3;
+    /** Optional world-space axis direction. Defaults to +Y. */
+    readonly axisDirection?: Vector3;
+}
+
+export interface RotationTransform {
+    readonly axisOrigin: Point3;
+    readonly axisDirection: Vector3;
+    readonly angleDegrees: number;
+}
+
+export interface ShapeTransform {
+    readonly translation?: Vector3;
+    readonly rotation?: RotationTransform;
+}
+
+export interface TransformParams {
+    readonly shape: ShapeHandle;
+    readonly transform: ShapeTransform;
 }
 
 // ---------------------------------------------------------------------------

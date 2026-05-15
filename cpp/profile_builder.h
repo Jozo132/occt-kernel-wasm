@@ -23,13 +23,20 @@ namespace occt_kernel {
  * The profile JSON schema mirrors the TypeScript `Profile` type:
  * ```json
  * {
- *   "segments": [
- *     { "type": "line",   "start": [0,0], "end": [10,0] },
- *     { "type": "arc",    "start": [10,0], "mid": [15,5], "end": [10,10] },
- *     { "type": "circle", "centre": [0,0], "radius": 5 }
+ *   "wires": [
+ *     {
+ *       "segments": [
+ *         { "type": "line",   "start": [0,0], "end": [10,0] },
+ *         { "type": "arc",    "start": [10,0], "mid": [15,5], "end": [10,10] },
+ *         { "type": "circle", "centre": [0,0], "radius": 5 }
+ *       ]
+ *     }
  *   ]
  * }
  * ```
+ *
+ * Backward compatibility: `{ "segments": [...] }` is still treated as a
+ * single-wire profile, and `{ "outer": ..., "holes": [...] }` is supported.
  *
  * @throws std::runtime_error on parse failure or open wire.
  */

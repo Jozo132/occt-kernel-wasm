@@ -26,8 +26,8 @@
   ],
   "scripts": {
     "build": "node scripts/build-dist.mjs",
-    "build:wasm": "bash scripts/build-wasm.sh",
-    "build:occt": "bash scripts/build-occt.sh",
+    "build:wasm": "node scripts/run-platform-build.mjs wasm",
+    "build:occt": "node scripts/run-platform-build.mjs occt",
     "build:native": "bash scripts/build-native.sh",
     "test": "jest",
     "test:watch": "jest --watch",

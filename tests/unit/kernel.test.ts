@@ -122,23 +122,65 @@ describe('extrudeProfile', () => {
         ],
     };
 
-    it('returns a valid handle for a square profile', () => {
+    const profileWithHole = {
+        outer: squareProfile,
+        holes: [{
+            segments: [
+                { type: 'line' as const, start: [3, 3] as [number,number], end: [7, 3] as [number,number] },
+                { type: 'line' as const, start: [7, 3] as [number,number], end: [7, 7] as [number,number] },
+                { type: 'line' as const, start: [7, 7] as [number,number], end: [3, 7] as [number,number] },
+                { type: 'line' as const, start: [3, 7] as [number,number], end: [3, 3] as [number,number] },
+            ],
+        }],
+    };
+
+    it('returns a valid handle for a legacy single-wire profile', () => {
         const k = makeKernel();
         const h = k.extrudeProfile({ profile: squareProfile, height: 5 });
         expect(h.id).toBeGreaterThan(0);
     });
 
-    it('throws KernelError when height <= 0', () => {
+    it('supports multi-wire profiles with holes and an explicit sketch plane', () => {
         const k = makeKernel();
-        expect(() => k.extrudeProfile({ profile: squareProfile, height: 0 })).toThrow(KernelError);
-        expect(() => k.extrudeProfile({ profile: squareProfile, height: -1 })).toThrow(KernelError);
+        const h = k.extrudeProfile({
+            profile: profileWithHole,
+            plane: {
+                origin: [0, 0, 5],
+                normal: [0, 1, 0],
+                xDirection: [1, 0, 0],
+            },
+            height: 12,
+        });
+        expect(h.id).toBeGreaterThan(0);
     });
 
-    it('throws KernelError when profile has no segments', () => {
+    it('supports explicit extrusion vectors', () => {
         const k = makeKernel();
-        expect(() =>
-            k.extrudeProfile({ profile: { segments: [] }, height: 5 })
-        ).toThrow(KernelError);
+        const h = k.extrudeProfile({ profile: squareProfile, vector: [0, 0, 8] });
+        expect(h.id).toBeGreaterThan(0);
+    });
+
+    it('throws KernelError when height and vector are both provided', () => {
+        const k = makeKernel();
+        expect(() => k.extrudeProfile({ profile: squareProfile, height: 5, vector: [0, 0, 5] })).toThrow(KernelError);
+    });
+
+    it('throws KernelError when plane.xDirection is parallel to plane.normal', () => {
+        const k = makeKernel();
+        expect(() => k.extrudeProfile({
+            profile: squareProfile,
+            plane: {
+                origin: [0, 0, 0],
+                normal: [0, 0, 1],
+                xDirection: [0, 0, 2],
+            },
+            height: 5,
+        })).toThrow(KernelError);
+    });
+
+    it('throws KernelError when profile has no wires', () => {
+        const k = makeKernel();
+        expect(() => k.extrudeProfile({ profile: { wires: [] }, height: 5 })).toThrow(KernelError);
     });
 });
 
@@ -162,9 +204,14 @@ describe('revolveProfile', () => {
         expect(h.id).toBeGreaterThan(0);
     });
 
-    it('returns a handle for a partial revolution', () => {
+    it('supports an arbitrary revolve axis', () => {
         const k = makeKernel();
-        const h = k.revolveProfile({ profile, angleDegrees: 90 });
+        const h = k.revolveProfile({
+            profile,
+            angleDegrees: 90,
+            axisOrigin: [10, 0, 0],
+            axisDirection: [0, 0, 1],
+        });
         expect(h.id).toBeGreaterThan(0);
     });
 
@@ -175,11 +222,56 @@ describe('revolveProfile', () => {
         expect(() => k.revolveProfile({ profile, angleDegrees: -90 })).toThrow(KernelError);
     });
 
+    it('throws KernelError when axisDirection is the zero vector', () => {
+        const k = makeKernel();
+        expect(() => k.revolveProfile({ profile, angleDegrees: 180, axisDirection: [0, 0, 0] })).toThrow(KernelError);
+    });
+
     it('throws KernelError when profile has no segments', () => {
         const k = makeKernel();
-        expect(() =>
-            k.revolveProfile({ profile: { segments: [] }, angleDegrees: 360 })
-        ).toThrow(KernelError);
+        expect(() => k.revolveProfile({ profile: { wires: [] }, angleDegrees: 360 })).toThrow(KernelError);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// transformShape
+// ---------------------------------------------------------------------------
+
+describe('transformShape', () => {
+    it('returns a new handle for a translation', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 2, dy: 2, dz: 2 });
+        const moved = k.transformShape({ shape: box, transform: { translation: [5, 0, 0] } });
+        expect(moved.id).toBeGreaterThan(0);
+        expect(moved.id).not.toBe(box.id);
+    });
+
+    it('returns a new handle for rotation and translation', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 2, dy: 2, dz: 2 });
+        const moved = k.transformShape({
+            shape: box,
+            transform: {
+                rotation: {
+                    axisOrigin: [0, 0, 0],
+                    axisDirection: [0, 0, 1],
+                    angleDegrees: 45,
+                },
+                translation: [1, 2, 3],
+            },
+        });
+        expect(moved.id).toBeGreaterThan(0);
+    });
+
+    it('throws KernelError for an empty transform', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 2, dy: 2, dz: 2 });
+        expect(() => k.transformShape({ shape: box, transform: {} })).toThrow(KernelError);
+    });
+
+    it('throws KernelError for an invalid shape handle', () => {
+        const k = makeKernel();
+        expect(() => k.transformShape({ shape: { id: 9999 }, transform: { translation: [1, 0, 0] } })).toThrow(KernelError);
     });
 });
 

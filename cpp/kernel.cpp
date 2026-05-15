@@ -4,6 +4,7 @@
  */
 
 #include "kernel.h"
+#include "json_utils.h"
 #include "profile_builder.h"
 
 // OCCT foundation
@@ -29,8 +30,12 @@
 // Prism / Revolution
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
+#include <gp_Trsf.hxx>
 
 // Boolean operations
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -111,6 +116,205 @@ static void throwKernelError(const std::string& code, const std::string& detail)
 }
 
 namespace {
+
+struct PlaneFrame {
+    bool hasValue = false;
+    gp_Pnt origin = gp_Pnt(0.0, 0.0, 0.0);
+    gp_Dir normal = gp_Dir(0.0, 0.0, 1.0);
+    gp_Dir xDirection = gp_Dir(1.0, 0.0, 0.0);
+};
+
+struct ExtrudeOptions {
+    bool hasHeight = false;
+    double height = 0.0;
+    bool hasVector = false;
+    gp_Vec vector = gp_Vec(0.0, 0.0, 0.0);
+    PlaneFrame plane;
+};
+
+struct RevolveOptions {
+    double angleDegrees = 0.0;
+    gp_Pnt axisOrigin = gp_Pnt(0.0, 0.0, 0.0);
+    gp_Dir axisDirection = gp_Dir(0.0, 1.0, 0.0);
+};
+
+struct RotationOptions {
+    bool hasValue = false;
+    gp_Pnt axisOrigin = gp_Pnt(0.0, 0.0, 0.0);
+    gp_Dir axisDirection = gp_Dir(0.0, 1.0, 0.0);
+    double angleDegrees = 0.0;
+};
+
+struct ShapeTransformOptions {
+    bool hasTranslation = false;
+    gp_Vec translation = gp_Vec(0.0, 0.0, 0.0);
+    RotationOptions rotation;
+};
+
+double requireFiniteNumber(double value, const std::string& name)
+{
+    if (!std::isfinite(value)) {
+        throw std::runtime_error(name + " must be finite");
+    }
+    return value;
+}
+
+gp_Pnt parsePoint3(const mini_json::Value& value, const std::string& context)
+{
+    const std::array<double, 3> point = mini_json::requirePoint3(value, context);
+    return gp_Pnt(
+        requireFiniteNumber(point[0], context + "[0]"),
+        requireFiniteNumber(point[1], context + "[1]"),
+        requireFiniteNumber(point[2], context + "[2]")
+    );
+}
+
+gp_Vec parseVector3(const mini_json::Value& value, const std::string& context, bool allowZero = false)
+{
+    const std::array<double, 3> vector = mini_json::requirePoint3(value, context);
+    const gp_Vec result(
+        requireFiniteNumber(vector[0], context + "[0]"),
+        requireFiniteNumber(vector[1], context + "[1]"),
+        requireFiniteNumber(vector[2], context + "[2]")
+    );
+    if (!allowZero && result.SquareMagnitude() <= 0.0) {
+        throw std::runtime_error(context + " must not be the zero vector");
+    }
+    return result;
+}
+
+gp_Dir parseDirection3(const mini_json::Value& value, const std::string& context)
+{
+    const gp_Vec vector = parseVector3(value, context, false);
+    return gp_Dir(vector.X(), vector.Y(), vector.Z());
+}
+
+PlaneFrame parsePlaneFrame(const mini_json::Value& root)
+{
+    PlaneFrame frame;
+    frame.hasValue = true;
+    frame.origin = parsePoint3(mini_json::requireMember(root, "origin", "plane"), "plane.origin");
+    frame.normal = parseDirection3(mini_json::requireMember(root, "normal", "plane"), "plane.normal");
+    frame.xDirection = parseDirection3(mini_json::requireMember(root, "xDirection", "plane"), "plane.xDirection");
+
+    if (std::abs(frame.normal.Dot(frame.xDirection)) > 1.0 - 1.0e-9) {
+        throw std::runtime_error("plane.xDirection must not be parallel to plane.normal");
+    }
+
+    return frame;
+}
+
+ExtrudeOptions parseExtrudeOptions(const std::string& optionsJson)
+{
+    const mini_json::Value root = mini_json::requireObject(mini_json::parse(optionsJson), "extrude options");
+    ExtrudeOptions options;
+
+    if (const mini_json::Value* heightValue = root.get("height")) {
+        options.hasHeight = true;
+        options.height = mini_json::requireNumber(*heightValue, "extrude.height");
+        if (!std::isfinite(options.height) || options.height <= 0.0) {
+            throw std::runtime_error("extrude.height must be > 0");
+        }
+    }
+
+    if (const mini_json::Value* vectorValue = root.get("vector")) {
+        options.hasVector = true;
+        options.vector = parseVector3(*vectorValue, "extrude.vector");
+    }
+
+    if (options.hasHeight == options.hasVector) {
+        throw std::runtime_error("Extrude options must specify exactly one of 'height' or 'vector'");
+    }
+
+    if (const mini_json::Value* planeValue = root.get("plane")) {
+        options.plane = parsePlaneFrame(mini_json::requireObject(*planeValue, "extrude.plane"));
+    }
+
+    return options;
+}
+
+RevolveOptions parseRevolveOptions(const std::string& optionsJson)
+{
+    const mini_json::Value root = mini_json::requireObject(mini_json::parse(optionsJson), "revolve options");
+    RevolveOptions options;
+    options.angleDegrees = mini_json::requireNumber(mini_json::requireMember(root, "angleDegrees", "revolve"), "revolve.angleDegrees");
+    if (!std::isfinite(options.angleDegrees) || options.angleDegrees <= 0.0 || options.angleDegrees > 360.0) {
+        throw std::runtime_error("revolve.angleDegrees must be in (0, 360]");
+    }
+
+    if (const mini_json::Value* axisOriginValue = root.get("axisOrigin")) {
+        options.axisOrigin = parsePoint3(*axisOriginValue, "revolve.axisOrigin");
+    }
+    if (const mini_json::Value* axisDirectionValue = root.get("axisDirection")) {
+        options.axisDirection = parseDirection3(*axisDirectionValue, "revolve.axisDirection");
+    }
+
+    return options;
+}
+
+ShapeTransformOptions parseShapeTransformOptions(const std::string& transformJson)
+{
+    const mini_json::Value root = mini_json::requireObject(mini_json::parse(transformJson), "shape transform");
+    ShapeTransformOptions options;
+
+    if (const mini_json::Value* translationValue = root.get("translation")) {
+        options.hasTranslation = true;
+        options.translation = parseVector3(*translationValue, "transform.translation", true);
+    }
+
+    if (const mini_json::Value* rotationValue = root.get("rotation")) {
+        const mini_json::Value& rotation = mini_json::requireObject(*rotationValue, "transform.rotation");
+        options.rotation.hasValue = true;
+        options.rotation.axisOrigin = parsePoint3(mini_json::requireMember(rotation, "axisOrigin", "transform.rotation"), "transform.rotation.axisOrigin");
+        options.rotation.axisDirection = parseDirection3(mini_json::requireMember(rotation, "axisDirection", "transform.rotation"), "transform.rotation.axisDirection");
+        options.rotation.angleDegrees = mini_json::requireNumber(mini_json::requireMember(rotation, "angleDegrees", "transform.rotation"), "transform.rotation.angleDegrees");
+        if (!std::isfinite(options.rotation.angleDegrees)) {
+            throw std::runtime_error("transform.rotation.angleDegrees must be finite");
+        }
+    }
+
+    if (!options.hasTranslation && !options.rotation.hasValue) {
+        throw std::runtime_error("Shape transform must specify translation and/or rotation");
+    }
+
+    return options;
+}
+
+TopoDS_Shape applyShapeTransform(const TopoDS_Shape& sourceShape, const gp_Trsf& transform, const std::string& context)
+{
+    BRepBuilderAPI_Transform transformer(sourceShape, transform, Standard_True);
+    transformer.Build();
+    if (!transformer.IsDone() || transformer.Shape().IsNull()) {
+        throw std::runtime_error("Failed to apply " + context + " transform");
+    }
+    return transformer.Shape();
+}
+
+TopoDS_Face placeProfileFace(const TopoDS_Face& sourceFace, const PlaneFrame& plane)
+{
+    if (!plane.hasValue) {
+        return sourceFace;
+    }
+
+    gp_Trsf transform;
+    transform.SetDisplacement(
+        gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0), gp_Dir(1.0, 0.0, 0.0)),
+        gp_Ax3(plane.origin, plane.normal, plane.xDirection)
+    );
+
+    return TopoDS::Face(applyShapeTransform(sourceFace, transform, "profile placement"));
+}
+
+gp_Vec makeExtrusionVector(const ExtrudeOptions& options)
+{
+    if (options.hasVector) {
+        return options.vector;
+    }
+    if (options.plane.hasValue) {
+        return gp_Vec(options.plane.normal.X(), options.plane.normal.Y(), options.plane.normal.Z()) * options.height;
+    }
+    return gp_Vec(0.0, 0.0, options.height);
+}
 
 struct StepImportOptions {
     bool heal = false;
@@ -550,13 +754,11 @@ uint32_t OcctKernel::createSphere(double radius) {
 // Sketch-based features
 // ---------------------------------------------------------------------------
 
-uint32_t OcctKernel::extrudeProfile(const std::string& profileJson, double height) {
-    if (height <= 0) {
-        throwKernelError("INVALID_PARAMS", "Extrusion height must be > 0");
-    }
+uint32_t OcctKernel::extrudeProfile(const std::string& profileJson, const std::string& optionsJson) {
     try {
-        TopoDS_Face face = buildFaceFromProfile(profileJson);
-        gp_Vec dir(0, 0, height);
+        const ExtrudeOptions options = parseExtrudeOptions(optionsJson);
+        TopoDS_Face face = placeProfileFace(buildFaceFromProfile(profileJson), options.plane);
+        const gp_Vec dir = makeExtrusionVector(options);
         BRepPrimAPI_MakePrism mkPrism(face, dir);
         mkPrism.Build();
         if (!mkPrism.IsDone()) {
@@ -571,14 +773,12 @@ uint32_t OcctKernel::extrudeProfile(const std::string& profileJson, double heigh
     return 0;
 }
 
-uint32_t OcctKernel::revolveProfile(const std::string& profileJson, double angleDegrees) {
-    if (angleDegrees <= 0 || angleDegrees > 360) {
-        throwKernelError("INVALID_PARAMS", "angleDegrees must be in (0, 360]");
-    }
+uint32_t OcctKernel::revolveProfile(const std::string& profileJson, const std::string& optionsJson) {
     try {
+        const RevolveOptions options = parseRevolveOptions(optionsJson);
         TopoDS_Face face = buildFaceFromProfile(profileJson);
-        gp_Ax1 axis(gp_Pnt(0, 0, 0), gp_Dir(0, 1, 0)); // revolve about Y
-        double angleRad = angleDegrees * M_PI / 180.0;
+        gp_Ax1 axis(options.axisOrigin, options.axisDirection);
+        const double angleRad = options.angleDegrees * M_PI / 180.0;
         BRepPrimAPI_MakeRevol mkRevol(face, axis, angleRad);
         mkRevol.Build();
         if (!mkRevol.IsDone()) {
@@ -716,6 +916,35 @@ uint32_t OcctKernel::chamferEdges(uint32_t id, double distance) {
             throwKernelError("OPERATION_FAILED", "BRepFilletAPI_MakeChamfer failed");
         }
         return storeShape(mkChamfer.Shape());
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+    }
+    return 0;
+}
+
+uint32_t OcctKernel::transformShape(uint32_t id, const std::string& transformJson) {
+    try {
+        const ShapeTransformOptions options = parseShapeTransformOptions(transformJson);
+        TopoDS_Shape shape = requireShape(id);
+
+        if (options.rotation.hasValue) {
+            gp_Trsf rotation;
+            rotation.SetRotation(
+                gp_Ax1(options.rotation.axisOrigin, options.rotation.axisDirection),
+                options.rotation.angleDegrees * M_PI / 180.0
+            );
+            shape = applyShapeTransform(shape, rotation, "rotation");
+        }
+
+        if (options.hasTranslation) {
+            gp_Trsf translation;
+            translation.SetTranslation(options.translation);
+            shape = applyShapeTransform(shape, translation, "translation");
+        }
+
+        return storeShape(shape);
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
