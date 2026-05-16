@@ -132,6 +132,30 @@ describe('extrudeProfile flow', () => {
         ],
     };
 
+    const bezierRectangleProfile = {
+        segments: [
+            { type: 'bezier' as const, controlPoints: [[0, 0] as [number, number], [6, 4] as [number, number], [14, 4] as [number, number], [20, 0] as [number, number]] },
+            { type: 'line' as const, start: [20, 0] as [number,number], end: [20, 10] as [number,number] },
+            { type: 'line' as const, start: [20, 10] as [number,number], end: [0, 10] as [number,number] },
+            { type: 'line' as const, start: [0, 10] as [number,number], end: [0, 0] as [number,number] },
+        ],
+    };
+
+    const bsplineRectangleProfile = {
+        segments: [
+            {
+                type: 'bspline' as const,
+                controlPoints: [[0, 0] as [number, number], [6, 4] as [number, number], [14, 4] as [number, number], [20, 0] as [number, number]],
+                degree: 3,
+                knots: [0, 1] as number[],
+                multiplicities: [4, 4] as number[],
+            },
+            { type: 'line' as const, start: [20, 0] as [number,number], end: [20, 10] as [number,number] },
+            { type: 'line' as const, start: [20, 10] as [number,number], end: [0, 10] as [number,number] },
+            { type: 'line' as const, start: [0, 10] as [number,number], end: [0, 0] as [number,number] },
+        ],
+    };
+
     it('extrudes a rectangle profile', () => {
         const k = makeKernel();
         const solid = k.extrudeProfile({ profile: rectangleProfile, height: 15 });
@@ -165,6 +189,20 @@ describe('extrudeProfile flow', () => {
     it('tessellates an extruded profile', () => {
         const k = makeKernel();
         const solid = k.extrudeProfile({ profile: rectangleProfile, height: 15 });
+        const mesh = k.tessellate({ shape: solid });
+        expect(mesh.positions.length).toBeGreaterThan(0);
+    });
+
+    it('extrudes and tessellates a bezier-edged profile', () => {
+        const k = makeKernel();
+        const solid = k.extrudeProfile({ profile: bezierRectangleProfile, height: 15 });
+        const mesh = k.tessellate({ shape: solid });
+        expect(mesh.positions.length).toBeGreaterThan(0);
+    });
+
+    it('extrudes and tessellates a bspline-edged profile', () => {
+        const k = makeKernel();
+        const solid = k.extrudeProfile({ profile: bsplineRectangleProfile, height: 15 });
         const mesh = k.tessellate({ shape: solid });
         expect(mesh.positions.length).toBeGreaterThan(0);
     });

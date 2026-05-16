@@ -6,6 +6,8 @@
  *   "line"   – start/end points
  *   "arc"    – start/mid/end points (3-point arc)
  *   "circle" – centre + radius (full circle → single edge wire)
+ *   "bezier" – controlPoints array (first/last are segment endpoints)
+ *   "bspline" – non-rational controlPoints + degree + knots + multiplicities
  */
 
 #pragma once
@@ -28,7 +30,8 @@ namespace occt_kernel {
  *       "segments": [
  *         { "type": "line",   "start": [0,0], "end": [10,0] },
  *         { "type": "arc",    "start": [10,0], "mid": [15,5], "end": [10,10] },
- *         { "type": "circle", "centre": [0,0], "radius": 5 }
+ *         { "type": "bezier", "controlPoints": [[10,10], [8,14], [2,14], [0,10]] },
+ *         { "type": "bspline", "controlPoints": [[0,10], [0,6], [0,2], [0,0]], "degree": 3, "knots": [0,1], "multiplicities": [4,4] }
  *       ]
  *     }
  *   ]

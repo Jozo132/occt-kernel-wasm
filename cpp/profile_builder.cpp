@@ -20,6 +20,9 @@
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_Curve.hxx>
 
 // OCCT topology builders
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -28,8 +31,12 @@
 #include <GC_MakeArcOfCircle.hxx>
 #include <GCE2d_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -78,6 +85,143 @@ void appendPoint(std::vector<std::pair<double, double>>& points, double x, doubl
     points.push_back({ x, y });
 }
 
+int requireIntegerNumber(const Value& value, const std::string& context, int minimum = std::numeric_limits<int>::min())
+{
+    const double number = mini_json::requireNumber(value, context);
+    if (!std::isfinite(number) || std::floor(number) != number) {
+        throw std::runtime_error("Expected integer for " + context);
+    }
+
+    const int result = static_cast<int>(number);
+    if (result < minimum) {
+        throw std::runtime_error(context + " must be >= " + std::to_string(minimum));
+    }
+    return result;
+}
+
+TColgp_Array1OfPnt buildControlPointArray(const Value& controlPointsValue, const std::string& context, std::size_t minimumCount)
+{
+    const Value& controlPoints = mini_json::requireArray(controlPointsValue, context);
+    if (controlPoints.array.size() < minimumCount) {
+        throw std::runtime_error(context + " must contain at least " + std::to_string(minimumCount) + " points");
+    }
+
+    TColgp_Array1OfPnt poles(1, static_cast<int>(controlPoints.array.size()));
+    for (std::size_t index = 0; index < controlPoints.array.size(); ++index) {
+        const auto point = mini_json::requirePoint2(controlPoints.array[index], context + "[" + std::to_string(index) + "]");
+        poles(static_cast<int>(index) + 1) = gp_Pnt(point[0], point[1], 0.0);
+    }
+    return poles;
+}
+
+std::vector<double> buildNumberVector(const Value& valuesValue, const std::string& context, std::size_t minimumCount)
+{
+    const Value& values = mini_json::requireArray(valuesValue, context);
+    if (values.array.size() < minimumCount) {
+        throw std::runtime_error(context + " must contain at least " + std::to_string(minimumCount) + " values");
+    }
+
+    std::vector<double> result;
+    result.reserve(values.array.size());
+    for (std::size_t index = 0; index < values.array.size(); ++index) {
+        const double value = mini_json::requireNumber(values.array[index], context + "[" + std::to_string(index) + "]");
+        if (!std::isfinite(value)) {
+            throw std::runtime_error(context + " must contain only finite values");
+        }
+        result.push_back(value);
+    }
+    return result;
+}
+
+std::vector<int> buildIntegerVector(const Value& valuesValue, const std::string& context, std::size_t minimumCount, int minimumValue)
+{
+    const Value& values = mini_json::requireArray(valuesValue, context);
+    if (values.array.size() < minimumCount) {
+        throw std::runtime_error(context + " must contain at least " + std::to_string(minimumCount) + " values");
+    }
+
+    std::vector<int> result;
+    result.reserve(values.array.size());
+    for (std::size_t index = 0; index < values.array.size(); ++index) {
+        result.push_back(requireIntegerNumber(values.array[index], context + "[" + std::to_string(index) + "]", minimumValue));
+    }
+    return result;
+}
+
+void requireStrictlyIncreasing(const std::vector<double>& values, const std::string& context)
+{
+    for (std::size_t index = 1; index < values.size(); ++index) {
+        if (values[index] <= values[index - 1]) {
+            throw std::runtime_error(context + " must be strictly increasing");
+        }
+    }
+}
+
+void appendCurveSampledPoints(const Handle(Geom_Curve)& curve, std::vector<std::pair<double, double>>& points, int sampleCount = 16)
+{
+    if (curve.IsNull()) {
+        throw std::runtime_error("Curve handle is null");
+    }
+
+    const double first = curve->FirstParameter();
+    const double last = curve->LastParameter();
+    const int steps = sampleCount < 2 ? 2 : sampleCount;
+    for (int step = 0; step <= steps; ++step) {
+        const double u = first + (last - first) * (static_cast<double>(step) / static_cast<double>(steps));
+        const gp_Pnt point = curve->Value(u);
+        appendPoint(points, point.X(), point.Y());
+    }
+}
+
+Handle(Geom_BezierCurve) buildBezierCurve(const Value& segment, const std::string& context)
+{
+    const TColgp_Array1OfPnt poles = buildControlPointArray(
+        mini_json::requireMember(segment, "controlPoints", context),
+        context + ".controlPoints",
+        2);
+    return new Geom_BezierCurve(poles);
+}
+
+Handle(Geom_BSplineCurve) buildBSplineCurve(const Value& segment, const std::string& context)
+{
+    const TColgp_Array1OfPnt poles = buildControlPointArray(
+        mini_json::requireMember(segment, "controlPoints", context),
+        context + ".controlPoints",
+        2);
+    const int degree = requireIntegerNumber(mini_json::requireMember(segment, "degree", context), context + ".degree", 1);
+    const std::vector<double> knots = buildNumberVector(
+        mini_json::requireMember(segment, "knots", context),
+        context + ".knots",
+        2);
+    const std::vector<int> multiplicities = buildIntegerVector(
+        mini_json::requireMember(segment, "multiplicities", context),
+        context + ".multiplicities",
+        2,
+        1);
+
+    if (knots.size() != multiplicities.size()) {
+        throw std::runtime_error(context + ".knots and " + context + ".multiplicities must have the same length");
+    }
+    requireStrictlyIncreasing(knots, context + ".knots");
+
+    int multiplicitySum = 0;
+    for (const int multiplicity : multiplicities) {
+        multiplicitySum += multiplicity;
+    }
+    if (multiplicitySum - degree - 1 != poles.Length()) {
+        throw std::runtime_error(context + " has inconsistent controlPoints/degree/multiplicities");
+    }
+
+    TColStd_Array1OfReal knotArray(1, static_cast<int>(knots.size()));
+    TColStd_Array1OfInteger multiplicityArray(1, static_cast<int>(multiplicities.size()));
+    for (std::size_t index = 0; index < knots.size(); ++index) {
+        knotArray(static_cast<int>(index) + 1) = knots[index];
+        multiplicityArray(static_cast<int>(index) + 1) = multiplicities[index];
+    }
+
+    return new Geom_BSplineCurve(poles, knotArray, multiplicityArray, degree, Standard_False);
+}
+
 BuiltWire buildWireFromSegments(const Value& segmentsValue, const std::string& context)
 {
     const Value& segments = mini_json::requireArray(segmentsValue, context);
@@ -87,7 +231,7 @@ BuiltWire buildWireFromSegments(const Value& segmentsValue, const std::string& c
 
     BRepBuilderAPI_MakeWire mkWire;
     std::vector<std::pair<double, double>> sampledPoints;
-    bool isCircleWire = segments.array.size() == 1;
+    bool isCircleWire = false;
 
     for (std::size_t index = 0; index < segments.array.size(); ++index) {
         const Value& segment = mini_json::requireObject(segments.array[index], context + "[" + std::to_string(index) + "]");
@@ -116,11 +260,9 @@ BuiltWire buildWireFromSegments(const Value& segmentsValue, const std::string& c
             const double my = mid[1];
             const double ex = end[0];
             const double ey = end[1];
-            appendPoint(sampledPoints, sx, sy);
-            appendPoint(sampledPoints, mx, my);
-            appendPoint(sampledPoints, ex, ey);
             gp_Pnt p1(sx, sy, 0), pm(mx, my, 0), p2(ex, ey, 0);
             Handle(Geom_TrimmedCurve) arc = GC_MakeArcOfCircle(p1, pm, p2);
+            appendCurveSampledPoints(arc, sampledPoints, 12);
             BRepBuilderAPI_MakeEdge mkEdge(arc);
             if (!mkEdge.IsDone()) throw std::runtime_error("Failed to build arc edge");
             mkWire.Add(mkEdge.Edge());
@@ -133,10 +275,23 @@ BuiltWire buildWireFromSegments(const Value& segmentsValue, const std::string& c
             appendPoint(sampledPoints, cx, cy + r);
             appendPoint(sampledPoints, cx - r, cy);
             appendPoint(sampledPoints, cx, cy - r);
+            isCircleWire = segments.array.size() == 1;
             gp_Ax2 ax(gp_Pnt(cx, cy, 0), gp_Dir(0, 0, 1));
             gp_Circ circ(ax, r);
             BRepBuilderAPI_MakeEdge mkEdge(circ);
             if (!mkEdge.IsDone()) throw std::runtime_error("Failed to build circle edge");
+            mkWire.Add(mkEdge.Edge());
+        } else if (type == "bezier") {
+            Handle(Geom_BezierCurve) curve = buildBezierCurve(segment, context);
+            appendCurveSampledPoints(curve, sampledPoints, 16);
+            BRepBuilderAPI_MakeEdge mkEdge(curve);
+            if (!mkEdge.IsDone()) throw std::runtime_error("Failed to build bezier edge");
+            mkWire.Add(mkEdge.Edge());
+        } else if (type == "bspline") {
+            Handle(Geom_BSplineCurve) curve = buildBSplineCurve(segment, context);
+            appendCurveSampledPoints(curve, sampledPoints, 16);
+            BRepBuilderAPI_MakeEdge mkEdge(curve);
+            if (!mkEdge.IsDone()) throw std::runtime_error("Failed to build bspline edge");
             mkWire.Add(mkEdge.Edge());
         } else {
             throw std::runtime_error("Unknown profile segment type: " + type);

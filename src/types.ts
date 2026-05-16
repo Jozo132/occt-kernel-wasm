@@ -72,10 +72,30 @@ export type ProfileSegmentCircle = {
     readonly radius: number;
 };
 
+export type ProfileSegmentBezier = {
+    readonly type: 'bezier';
+    /** Bezier control points. The first and last points are the segment endpoints. */
+    readonly controlPoints: readonly Point2[];
+};
+
+export type ProfileSegmentBspline = {
+    readonly type: 'bspline';
+    /** Non-rational B-spline control points (poles). */
+    readonly controlPoints: readonly Point2[];
+    /** Polynomial degree of the curve. */
+    readonly degree: number;
+    /** Strictly increasing knot values. */
+    readonly knots: readonly number[];
+    /** Knot multiplicities matching the `knots` array. */
+    readonly multiplicities: readonly number[];
+};
+
 export type ProfileSegment =
     | ProfileSegmentLine
     | ProfileSegmentArc
-    | ProfileSegmentCircle;
+    | ProfileSegmentCircle
+    | ProfileSegmentBezier
+    | ProfileSegmentBspline;
 
 export interface ProfileWire {
     readonly segments: readonly ProfileSegment[];

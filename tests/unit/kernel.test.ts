@@ -122,6 +122,30 @@ describe('extrudeProfile', () => {
         ],
     };
 
+    const bezierProfile = {
+        segments: [
+            { type: 'bezier' as const, controlPoints: [[0, 0] as [number, number], [3, 4] as [number, number], [7, 4] as [number, number], [10, 0] as [number, number]] },
+            { type: 'line' as const, start: [10, 0] as [number,number], end: [10, 10] as [number,number] },
+            { type: 'line' as const, start: [10, 10] as [number,number], end: [0, 10] as [number,number] },
+            { type: 'line' as const, start: [0, 10] as [number,number], end: [0, 0] as [number,number] },
+        ],
+    };
+
+    const bsplineProfile = {
+        segments: [
+            {
+                type: 'bspline' as const,
+                controlPoints: [[0, 0] as [number, number], [3, 4] as [number, number], [7, 4] as [number, number], [10, 0] as [number, number]],
+                degree: 3,
+                knots: [0, 1] as number[],
+                multiplicities: [4, 4] as number[],
+            },
+            { type: 'line' as const, start: [10, 0] as [number,number], end: [10, 10] as [number,number] },
+            { type: 'line' as const, start: [10, 10] as [number,number], end: [0, 10] as [number,number] },
+            { type: 'line' as const, start: [0, 10] as [number,number], end: [0, 0] as [number,number] },
+        ],
+    };
+
     const profileWithHole = {
         outer: squareProfile,
         holes: [{
@@ -160,6 +184,18 @@ describe('extrudeProfile', () => {
         expect(h.id).toBeGreaterThan(0);
     });
 
+    it('supports bezier wire segments', () => {
+        const k = makeKernel();
+        const h = k.extrudeProfile({ profile: bezierProfile, height: 5 });
+        expect(h.id).toBeGreaterThan(0);
+    });
+
+    it('supports bspline wire segments', () => {
+        const k = makeKernel();
+        const h = k.extrudeProfile({ profile: bsplineProfile, height: 5 });
+        expect(h.id).toBeGreaterThan(0);
+    });
+
     it('throws KernelError when height and vector are both provided', () => {
         const k = makeKernel();
         expect(() => k.extrudeProfile({ profile: squareProfile, height: 5, vector: [0, 0, 5] })).toThrow(KernelError);
@@ -181,6 +217,30 @@ describe('extrudeProfile', () => {
     it('throws KernelError when profile has no wires', () => {
         const k = makeKernel();
         expect(() => k.extrudeProfile({ profile: { wires: [] }, height: 5 })).toThrow(KernelError);
+    });
+
+    it('throws KernelError for invalid bezier control points', () => {
+        const k = makeKernel();
+        expect(() => k.extrudeProfile({
+            profile: { segments: [{ type: 'bezier', controlPoints: [[0, 0] as [number, number]] }] },
+            height: 5,
+        })).toThrow(KernelError);
+    });
+
+    it('throws KernelError for an invalid bspline knot contract', () => {
+        const k = makeKernel();
+        expect(() => k.extrudeProfile({
+            profile: {
+                segments: [{
+                    type: 'bspline',
+                    controlPoints: [[0, 0], [3, 4], [7, 4], [10, 0]],
+                    degree: 3,
+                    knots: [0, 1],
+                    multiplicities: [3, 3],
+                }],
+            },
+            height: 5,
+        })).toThrow(KernelError);
     });
 });
 

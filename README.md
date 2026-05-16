@@ -126,6 +126,22 @@ Circle segments:
 { type: 'circle', centre: [0, 0], radius: 5 }
 ```
 
+Bezier segments:
+```ts
+{ type: 'bezier', controlPoints: [[0, 0], [4, 6], [8, 6], [12, 0]] }
+```
+
+B-spline segments (non-rational, non-periodic):
+```ts
+{
+    type: 'bspline',
+    controlPoints: [[0, 0], [3, 4], [7, 4], [10, 0]],
+    degree: 3,
+    knots: [0, 1],
+    multiplicities: [4, 4],
+}
+```
+
 ### Boolean operations
 
 ```ts

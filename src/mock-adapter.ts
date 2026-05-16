@@ -59,6 +59,22 @@ interface MockShapeTransform {
     rotation?: MockRotationTransform;
 }
 
+function isNumberArray(value: unknown, minimumLength: number): value is number[] {
+    return Array.isArray(value)
+        && value.length >= minimumLength
+        && value.every((entry) => typeof entry === 'number' && Number.isFinite(entry));
+}
+
+function isPointArray(value: unknown, length: 2 | 3, minimumLength: number): value is number[][] {
+    return Array.isArray(value)
+        && value.length >= minimumLength
+        && value.every((entry) => isPoint(entry, length));
+}
+
+function isPositiveInteger(value: unknown): value is number {
+    return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
 function isPoint(value: unknown, length: 2 | 3): value is number[] {
     return Array.isArray(value)
         && value.length === length
@@ -123,8 +139,67 @@ export class MockNativeKernel {
             if (!wire || !Array.isArray(wire.segments) || wire.segments.length === 0) {
                 throw new KernelError('INVALID_PARAMS', `Profile wire ${wireIndex} must include segments`);
             }
+            for (const [segmentIndex, segment] of wire.segments.entries()) {
+                this._validateProfileSegment(segment, `profile.wires[${wireIndex}].segments[${segmentIndex}]`);
+            }
         }
         return profile as MockProfile;
+    }
+
+    private _validateProfileSegment(segment: unknown, label: string): void {
+        const candidate = segment as Record<string, unknown>;
+        if (!candidate || typeof candidate.type !== 'string') {
+            throw new KernelError('INVALID_PARAMS', `${label}.type must be a string`);
+        }
+
+        switch (candidate.type) {
+            case 'line':
+                if (!isPoint(candidate.start, 2) || !isPoint(candidate.end, 2)) {
+                    throw new KernelError('INVALID_PARAMS', `${label} must include start and end points`);
+                }
+                break;
+            case 'arc':
+                if (!isPoint(candidate.start, 2) || !isPoint(candidate.mid, 2) || !isPoint(candidate.end, 2)) {
+                    throw new KernelError('INVALID_PARAMS', `${label} must include start, mid, and end points`);
+                }
+                break;
+            case 'circle':
+                if (!isPoint(candidate.centre, 2) || typeof candidate.radius !== 'number' || candidate.radius <= 0) {
+                    throw new KernelError('INVALID_PARAMS', `${label} must include a centre point and positive radius`);
+                }
+                break;
+            case 'bezier':
+                if (!isPointArray(candidate.controlPoints, 2, 2)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.controlPoints must contain at least two 2D points`);
+                }
+                break;
+            case 'bspline': {
+                if (!isPointArray(candidate.controlPoints, 2, 2)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.controlPoints must contain at least two 2D points`);
+                }
+                if (!isPositiveInteger(candidate.degree)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.degree must be a positive integer`);
+                }
+                if (!isNumberArray(candidate.knots, 2)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.knots must contain at least two finite numbers`);
+                }
+                if (!Array.isArray(candidate.multiplicities) || candidate.multiplicities.length !== candidate.knots.length || !candidate.multiplicities.every(isPositiveInteger)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.multiplicities must be positive integers matching the knot count`);
+                }
+                for (let index = 1; index < candidate.knots.length; index += 1) {
+                    if (candidate.knots[index] <= candidate.knots[index - 1]) {
+                        throw new KernelError('INVALID_PARAMS', `${label}.knots must be strictly increasing`);
+                    }
+                }
+                const multiplicitySum = (candidate.multiplicities as number[]).reduce((sum, value) => sum + value, 0);
+                if (multiplicitySum - (candidate.degree as number) - 1 !== candidate.controlPoints.length) {
+                    throw new KernelError('INVALID_PARAMS', `${label} has inconsistent controlPoints, degree, and multiplicities`);
+                }
+                break;
+            }
+            default:
+                throw new KernelError('INVALID_PARAMS', `${label}.type is not supported`);
+        }
     }
 
     private _parseExtrudeOptions(optionsJson: string): Record<string, unknown> {

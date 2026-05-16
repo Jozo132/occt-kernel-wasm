@@ -155,6 +155,34 @@ function requirePoint3(value: Point3, name: string): void {
     requireFinite(value[2], `${name}[2]`);
 }
 
+function requirePositiveInteger(value: number, name: string): void {
+    if (!Number.isInteger(value) || value <= 0) {
+        throw new KernelError('INVALID_PARAMS', `${name} must be a positive integer`);
+    }
+}
+
+function requirePoint2Array(values: readonly Point2[], name: string, minimumLength: number): void {
+    if (!Array.isArray(values) || values.length < minimumLength) {
+        throw new KernelError('INVALID_PARAMS', `${name} must contain at least ${minimumLength} points`);
+    }
+    values.forEach((value, index) => requirePoint2(value, `${name}[${index}]`));
+}
+
+function requireFiniteNumberArray(values: readonly number[], name: string, minimumLength: number): void {
+    if (!Array.isArray(values) || values.length < minimumLength) {
+        throw new KernelError('INVALID_PARAMS', `${name} must contain at least ${minimumLength} values`);
+    }
+    values.forEach((value, index) => requireFinite(value, `${name}[${index}]`));
+}
+
+function requireStrictlyIncreasing(values: readonly number[], name: string): void {
+    for (let index = 1; index < values.length; index += 1) {
+        if (values[index] <= values[index - 1]) {
+            throw new KernelError('INVALID_PARAMS', `${name} must be strictly increasing`);
+        }
+    }
+}
+
 function requireVector3(value: Vector3, name: string, allowZero = false): void {
     requirePoint3(value, name);
     if (!allowZero && value[0] === 0 && value[1] === 0 && value[2] === 0) {
@@ -288,6 +316,25 @@ function validateProfileSegment(segment: ProfileSegment, indexLabel: string): vo
             requirePoint2(segment.centre, `${indexLabel}.centre`);
             requirePositive(segment.radius, `${indexLabel}.radius`);
             break;
+        case 'bezier':
+            requirePoint2Array(segment.controlPoints, `${indexLabel}.controlPoints`, 2);
+            break;
+        case 'bspline': {
+            requirePoint2Array(segment.controlPoints, `${indexLabel}.controlPoints`, 2);
+            requirePositiveInteger(segment.degree, `${indexLabel}.degree`);
+            requireFiniteNumberArray(segment.knots, `${indexLabel}.knots`, 2);
+            requireStrictlyIncreasing(segment.knots, `${indexLabel}.knots`);
+            if (!Array.isArray(segment.multiplicities) || segment.multiplicities.length !== segment.knots.length) {
+                throw new KernelError('INVALID_PARAMS', `${indexLabel}.multiplicities must match ${indexLabel}.knots in length`);
+            }
+            segment.multiplicities.forEach((value, index) => requirePositiveInteger(value, `${indexLabel}.multiplicities[${index}]`));
+
+            const multiplicitySum = segment.multiplicities.reduce((sum, value) => sum + value, 0);
+            if (multiplicitySum - segment.degree - 1 !== segment.controlPoints.length) {
+                throw new KernelError('INVALID_PARAMS', `${indexLabel} has inconsistent controlPoints, degree, and multiplicities`);
+            }
+            break;
+        }
         default:
             throw new KernelError('INVALID_PARAMS', `${indexLabel}.type is not supported`);
     }
