@@ -49,6 +49,9 @@ import type {
     ImportStepParams,
     KernelCapabilities,
     HydrateCheckpointParams,
+    LoftFeatureParams,
+    LoftSection,
+    LoftSpec,
     MapEntitiesAcrossRevisionsParams,
     PlaneFrame,
     Point2,
@@ -70,11 +73,15 @@ import type {
     ShapeHandle,
     ShapeTransform,
     SphereParams,
+    SpatialCurveSegment,
+    SpatialWire,
     StableEntityResolution,
     StepImportMessage,
     StepImportOptions,
     StepImportReadStatus,
     StepImportTransferStatus,
+    SweepProfileFeatureParams,
+    SweepProfileSpec,
     TessellateParams,
     TessellationResult,
     TopologyResult,
@@ -101,6 +108,8 @@ export interface NativeKernel {
     revolveProfile(profileJson: string, optionsJson: string): number;
     revolveProfileWithSpec?: (id: number, profileJson: string, specJson: string) => number;
     revolveCutProfileWithSpec?: (id: number, profileJson: string, specJson: string) => number;
+    sweepProfileWithSpec?: (id: number, profileJson: string, specJson: string) => number;
+    loftWithSpec?: (id: number, sectionsJson: string, specJson: string) => number;
     booleanUnion(id1: number, id2: number): number;
     booleanSubtract(id1: number, id2: number): number;
     booleanIntersect(id1: number, id2: number): number;
@@ -282,6 +291,13 @@ function requirePoint2Array(values: readonly Point2[], name: string, minimumLeng
     values.forEach((value, index) => requirePoint2(value, `${name}[${index}]`));
 }
 
+function requirePoint3Array(values: readonly Point3[], name: string, minimumLength: number): void {
+    if (!Array.isArray(values) || values.length < minimumLength) {
+        throw new KernelError('INVALID_PARAMS', `${name} must contain at least ${minimumLength} points`);
+    }
+    values.forEach((value, index) => requirePoint3(value, `${name}[${index}]`));
+}
+
 function requireFiniteNumberArray(values: readonly number[], name: string, minimumLength: number): void {
     if (!Array.isArray(values) || values.length < minimumLength) {
         throw new KernelError('INVALID_PARAMS', `${name} must contain at least ${minimumLength} values`);
@@ -433,6 +449,10 @@ interface CanonicalProfile {
     wires: CanonicalProfileWire[];
 }
 
+interface CanonicalSpatialWire {
+    segments: SpatialCurveSegment[];
+}
+
 interface ExtrudeOptionsPayload {
     height?: number;
     vector?: Vector3;
@@ -479,6 +499,56 @@ interface RevolveProfileSpecPayload {
     metadata?: Record<string, unknown>;
 }
 
+interface SweepTrihedronModePayload {
+    type: 'correctedFrenet' | 'frenet' | 'discrete' | 'fixedTrihedron' | 'fixedBinormal' | 'auxiliarySpine';
+    frame?: PlaneFrame;
+    binormal?: Vector3;
+    spineJson?: string;
+    curvilinearEquivalence?: boolean;
+    contact?: 'none' | 'contact' | 'contactOnBorder';
+}
+
+interface SweepProfileSpecPayload {
+    schemaVersion: 1;
+    allowUnknownFields?: boolean;
+    unit?: { length?: 'model'; angle?: 'radians' | 'degrees' };
+    plane?: PlaneFrame;
+    spineJson: string;
+    trihedronMode?: SweepTrihedronModePayload;
+    sectionWithContact?: boolean;
+    sectionWithCorrection?: boolean;
+    solid?: boolean;
+    forceApproxC1?: boolean;
+    transitionMode?: 'transformed' | 'rightCorner' | 'roundCorner';
+    tolerance?: { tol3d?: number; boundTol?: number; angularTol?: number };
+    maxDegree?: number;
+    maxSegments?: number;
+    cut?: boolean;
+    metadata?: Record<string, unknown>;
+}
+
+type LoftSectionPayload =
+    | { type: 'profile'; profileJson: string; plane?: PlaneFrame }
+    | { type: 'wire'; wireJson: string }
+    | { type: 'point'; point: Point3 };
+
+interface LoftSpecPayload {
+    schemaVersion: 1;
+    allowUnknownFields?: boolean;
+    solid?: boolean;
+    ruled?: boolean;
+    pres3d?: number;
+    checkCompatibility?: boolean;
+    smoothing?: boolean;
+    parametrization?: 'chordLength' | 'centripetal' | 'isoParametric';
+    continuity?: 'C0' | 'G1' | 'C1' | 'G2' | 'C2' | 'C3' | 'CN';
+    criteriumWeight?: { w1: number; w2: number; w3: number };
+    maxDegree?: number;
+    mutableInput?: boolean;
+    cut?: boolean;
+    metadata?: Record<string, unknown>;
+}
+
 function validateProfileSegment(segment: ProfileSegment, indexLabel: string): void {
     switch (segment.type) {
         case 'line':
@@ -518,6 +588,50 @@ function validateProfileSegment(segment: ProfileSegment, indexLabel: string): vo
     }
 }
 
+function validateSpatialSegment(segment: SpatialCurveSegment, indexLabel: string): void {
+    switch (segment.type) {
+        case 'line':
+            requirePoint3(segment.start, `${indexLabel}.start`);
+            requirePoint3(segment.end, `${indexLabel}.end`);
+            break;
+        case 'arc':
+            requirePoint3(segment.start, `${indexLabel}.start`);
+            requirePoint3(segment.mid, `${indexLabel}.mid`);
+            requirePoint3(segment.end, `${indexLabel}.end`);
+            break;
+        case 'circle':
+            requirePoint3(segment.center, `${indexLabel}.center`);
+            requireVector3(segment.normal, `${indexLabel}.normal`);
+            requirePositive(segment.radius, `${indexLabel}.radius`);
+            if (segment.xDirection !== undefined) {
+                requireVector3(segment.xDirection, `${indexLabel}.xDirection`);
+                requireNonParallelVectors(segment.normal, segment.xDirection, `${indexLabel}.normal`, `${indexLabel}.xDirection`);
+            }
+            break;
+        case 'bezier':
+            requirePoint3Array(segment.controlPoints, `${indexLabel}.controlPoints`, 2);
+            break;
+        case 'bspline': {
+            requirePoint3Array(segment.controlPoints, `${indexLabel}.controlPoints`, 2);
+            requirePositiveInteger(segment.degree, `${indexLabel}.degree`);
+            requireFiniteNumberArray(segment.knots, `${indexLabel}.knots`, 2);
+            requireStrictlyIncreasing(segment.knots, `${indexLabel}.knots`);
+            if (!Array.isArray(segment.multiplicities) || segment.multiplicities.length !== segment.knots.length) {
+                throw new KernelError('INVALID_PARAMS', `${indexLabel}.multiplicities must match ${indexLabel}.knots in length`);
+            }
+            segment.multiplicities.forEach((value, index) => requirePositiveInteger(value, `${indexLabel}.multiplicities[${index}]`));
+
+            const multiplicitySum = segment.multiplicities.reduce((sum, value) => sum + value, 0);
+            if (multiplicitySum - segment.degree - 1 !== segment.controlPoints.length) {
+                throw new KernelError('INVALID_PARAMS', `${indexLabel} has inconsistent controlPoints, degree, and multiplicities`);
+            }
+            break;
+        }
+        default:
+            throw new KernelError('INVALID_PARAMS', `${indexLabel}.type is not supported`);
+    }
+}
+
 function normalizeWire(wire: ProfileWire, index: number): CanonicalProfileWire {
     if (!wire || !Array.isArray(wire.segments) || wire.segments.length === 0) {
         throw new KernelError('INVALID_PARAMS', `profile wire ${index} must have at least one segment`);
@@ -538,6 +652,23 @@ function normalizeProfile(profile: Profile): CanonicalProfile {
     return {
         wires: wires.map((wire, index) => normalizeWire(wire, index)),
     };
+}
+
+function normalizeSpatialWire(wire: SpatialWire, path: string): CanonicalSpatialWire {
+    if (!wire || !Array.isArray(wire.segments) || wire.segments.length === 0) {
+        throw new KernelError('INVALID_PARAMS', `${path} must have at least one segment`);
+    }
+    wire.segments.forEach((segment, segmentIndex) => validateSpatialSegment(segment, `${path}.segments[${segmentIndex}]`));
+    return {
+        segments: [...wire.segments],
+    };
+}
+
+function requireSingleWireProfile(profile: CanonicalProfile, path: string): CanonicalProfile {
+    if (profile.wires.length !== 1) {
+        throw new KernelError('INVALID_PARAMS', `${path} must contain exactly one closed wire for this operation`);
+    }
+    return profile;
 }
 
 function normalizePlaneFrame(plane?: PlaneFrame): PlaneFrame | undefined {
@@ -813,6 +944,187 @@ function normalizeRevolveProfileSpec(spec: RevolveProfileSpec): RevolveProfileSp
     };
 }
 
+function normalizeSweepProfileSpec(spec: SweepProfileSpec, cut: boolean): SweepProfileSpecPayload {
+    requireSchemaVersion(spec, 'sweep spec');
+
+    const unit = spec.unit !== undefined
+        ? (() => {
+            if (spec.unit.length !== undefined && spec.unit.length !== 'model') {
+                throw new KernelError('INVALID_PARAMS', 'sweep spec.unit.length must be model');
+            }
+            if (spec.unit.angle !== undefined && spec.unit.angle !== 'radians' && spec.unit.angle !== 'degrees') {
+                throw new KernelError('INVALID_PARAMS', 'sweep spec.unit.angle must be radians or degrees');
+            }
+            return {
+                ...(spec.unit.length !== undefined ? { length: spec.unit.length } : {}),
+                ...(spec.unit.angle !== undefined ? { angle: spec.unit.angle } : {}),
+            } as { length?: 'model'; angle?: 'radians' | 'degrees' };
+        })()
+        : undefined;
+
+    const plane = normalizePlaneFrame(spec.plane);
+    const spineJson = JSON.stringify(normalizeSpatialWire(spec.spine, 'spec.spine'));
+    const solid = spec.solid ?? true;
+    if (cut && !solid) {
+        throw new KernelError('INVALID_PARAMS', 'sweep cut operations require spec.solid !== false');
+    }
+
+    const trihedronMode = spec.trihedronMode !== undefined
+        ? (() => {
+            switch (spec.trihedronMode.type) {
+                case 'correctedFrenet':
+                case 'frenet':
+                case 'discrete':
+                    return { type: spec.trihedronMode.type } as SweepTrihedronModePayload;
+                case 'fixedTrihedron':
+                    return {
+                        type: 'fixedTrihedron' as const,
+                        frame: normalizePlaneFrame(spec.trihedronMode.frame) as PlaneFrame,
+                    };
+                case 'fixedBinormal':
+                    requireVector3(spec.trihedronMode.binormal, 'spec.trihedronMode.binormal');
+                    return {
+                        type: 'fixedBinormal' as const,
+                        binormal: [...spec.trihedronMode.binormal] as Vector3,
+                    };
+                case 'auxiliarySpine':
+                    return {
+                        type: 'auxiliarySpine' as const,
+                        spineJson: JSON.stringify(normalizeSpatialWire(spec.trihedronMode.spine, 'spec.trihedronMode.spine')),
+                        ...(spec.trihedronMode.curvilinearEquivalence !== undefined ? { curvilinearEquivalence: spec.trihedronMode.curvilinearEquivalence } : {}),
+                        ...(spec.trihedronMode.contact !== undefined ? { contact: spec.trihedronMode.contact } : {}),
+                    };
+                default:
+                    throw new KernelError('INVALID_PARAMS', 'spec.trihedronMode.type is not supported');
+            }
+        })()
+        : undefined;
+
+    const tolerance = spec.tolerance !== undefined
+        ? (() => {
+            if (spec.tolerance.tol3d !== undefined) {
+                requirePositive(spec.tolerance.tol3d, 'spec.tolerance.tol3d');
+            }
+            if (spec.tolerance.boundTol !== undefined) {
+                requirePositive(spec.tolerance.boundTol, 'spec.tolerance.boundTol');
+            }
+            if (spec.tolerance.angularTol !== undefined) {
+                requirePositive(spec.tolerance.angularTol, 'spec.tolerance.angularTol');
+            }
+            return {
+                ...(spec.tolerance.tol3d !== undefined ? { tol3d: spec.tolerance.tol3d } : {}),
+                ...(spec.tolerance.boundTol !== undefined ? { boundTol: spec.tolerance.boundTol } : {}),
+                ...(spec.tolerance.angularTol !== undefined ? { angularTol: spec.tolerance.angularTol } : {}),
+            };
+        })()
+        : undefined;
+
+    if (spec.maxDegree !== undefined) {
+        requirePositiveInteger(spec.maxDegree, 'spec.maxDegree');
+    }
+    if (spec.maxSegments !== undefined) {
+        requirePositiveInteger(spec.maxSegments, 'spec.maxSegments');
+    }
+
+    return {
+        schemaVersion: 1,
+        ...(spec.allowUnknownFields !== undefined ? { allowUnknownFields: spec.allowUnknownFields } : {}),
+        ...(unit ? { unit } : {}),
+        ...(plane ? { plane } : {}),
+        spineJson,
+        ...(trihedronMode ? { trihedronMode } : {}),
+        ...(spec.sectionWithContact !== undefined ? { sectionWithContact: spec.sectionWithContact } : {}),
+        ...(spec.sectionWithCorrection !== undefined ? { sectionWithCorrection: spec.sectionWithCorrection } : {}),
+        ...(spec.solid !== undefined ? { solid: spec.solid } : {}),
+        ...(spec.forceApproxC1 !== undefined ? { forceApproxC1: spec.forceApproxC1 } : {}),
+        ...(spec.transitionMode !== undefined ? { transitionMode: spec.transitionMode } : {}),
+        ...(tolerance ? { tolerance } : {}),
+        ...(spec.maxDegree !== undefined ? { maxDegree: spec.maxDegree } : {}),
+        ...(spec.maxSegments !== undefined ? { maxSegments: spec.maxSegments } : {}),
+        ...(cut ? { cut: true } : {}),
+        ...(spec.metadata !== undefined ? { metadata: spec.metadata } : {}),
+    };
+}
+
+function normalizeLoftSections(sections: readonly LoftSection[]): LoftSectionPayload[] {
+    if (!Array.isArray(sections) || sections.length < 2) {
+        throw new KernelError('INVALID_PARAMS', 'loft sections must contain at least two entries');
+    }
+
+    return sections.map((section, index) => {
+        switch (section.type) {
+            case 'profile':
+                return (() => {
+                    const profile = requireSingleWireProfile(normalizeProfile(section.profile), `sections[${index}].profile`);
+                    return {
+                        type: 'profile' as const,
+                        profileJson: JSON.stringify(profile),
+                        ...(section.plane !== undefined ? { plane: normalizePlaneFrame(section.plane) as PlaneFrame } : {}),
+                    };
+                })();
+            case 'wire':
+                return {
+                    type: 'wire' as const,
+                    wireJson: JSON.stringify(normalizeSpatialWire(section.wire, `sections[${index}].wire`)),
+                };
+            case 'point':
+                requirePoint3(section.point, `sections[${index}].point`);
+                return {
+                    type: 'point' as const,
+                    point: [section.point[0], section.point[1], section.point[2]] as Point3,
+                };
+            default:
+                throw new KernelError('INVALID_PARAMS', `sections[${index}].type is not supported`);
+        }
+    });
+}
+
+function normalizeLoftSpec(spec: LoftSpec, cut: boolean): LoftSpecPayload {
+    requireSchemaVersion(spec, 'loft spec');
+
+    const solid = spec.solid ?? true;
+    if (cut && !solid) {
+        throw new KernelError('INVALID_PARAMS', 'loft cut operations require spec.solid !== false');
+    }
+
+    if (spec.pres3d !== undefined) {
+        requirePositive(spec.pres3d, 'spec.pres3d');
+    }
+    if (spec.maxDegree !== undefined) {
+        requirePositiveInteger(spec.maxDegree, 'spec.maxDegree');
+    }
+
+    const criteriumWeight = spec.criteriumWeight !== undefined
+        ? (() => {
+            requirePositive(spec.criteriumWeight.w1, 'spec.criteriumWeight.w1');
+            requirePositive(spec.criteriumWeight.w2, 'spec.criteriumWeight.w2');
+            requirePositive(spec.criteriumWeight.w3, 'spec.criteriumWeight.w3');
+            return {
+                w1: spec.criteriumWeight.w1,
+                w2: spec.criteriumWeight.w2,
+                w3: spec.criteriumWeight.w3,
+            };
+        })()
+        : undefined;
+
+    return {
+        schemaVersion: 1,
+        ...(spec.allowUnknownFields !== undefined ? { allowUnknownFields: spec.allowUnknownFields } : {}),
+        ...(spec.solid !== undefined ? { solid: spec.solid } : {}),
+        ...(spec.ruled !== undefined ? { ruled: spec.ruled } : {}),
+        ...(spec.pres3d !== undefined ? { pres3d: spec.pres3d } : {}),
+        ...(spec.checkCompatibility !== undefined ? { checkCompatibility: spec.checkCompatibility } : {}),
+        ...(spec.smoothing !== undefined ? { smoothing: spec.smoothing } : {}),
+        ...(spec.parametrization !== undefined ? { parametrization: spec.parametrization } : {}),
+        ...(spec.continuity !== undefined ? { continuity: spec.continuity } : {}),
+        ...(criteriumWeight ? { criteriumWeight } : {}),
+        ...(spec.maxDegree !== undefined ? { maxDegree: spec.maxDegree } : {}),
+        ...(spec.mutableInput !== undefined ? { mutableInput: spec.mutableInput } : {}),
+        ...(cut ? { cut: true } : {}),
+        ...(spec.metadata !== undefined ? { metadata: spec.metadata } : {}),
+    };
+}
+
 function normalizeRevolveOptions(params: RevolveParams): RevolveOptionsPayload {
     if (!Number.isFinite(params.angleDegrees) || params.angleDegrees <= 0 || params.angleDegrees > 360) {
         throw new KernelError('INVALID_PARAMS', 'angleDegrees must be in the range (0, 360]');
@@ -977,6 +1289,26 @@ export class OcctKernel {
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
         const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec));
         return makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+    }
+
+    /** Apply a versioned sweep feature spec to a resident shape. */
+    sweepProfileWithSpec(params: SweepProfileFeatureParams): ShapeHandle {
+        if (typeof this._native.sweepProfileWithSpec !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support sweepProfileWithSpec');
+        }
+        const profileJson = JSON.stringify(requireSingleWireProfile(normalizeProfile(params.profile), 'profile'));
+        const specJson = JSON.stringify(normalizeSweepProfileSpec(params.spec, params.cut === true));
+        return makeHandle(wrap(() => this._native.sweepProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+    }
+
+    /** Apply a versioned loft feature spec to a resident shape. */
+    loftWithSpec(params: LoftFeatureParams): ShapeHandle {
+        if (typeof this._native.loftWithSpec !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support loftWithSpec');
+        }
+        const sectionsJson = JSON.stringify(normalizeLoftSections(params.sections));
+        const specJson = JSON.stringify(normalizeLoftSpec(params.spec, params.cut === true));
+        return makeHandle(wrap(() => this._native.loftWithSpec?.(params.shape.id, sectionsJson, specJson) ?? 0));
     }
 
     // -----------------------------------------------------------------------

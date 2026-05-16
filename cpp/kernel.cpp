@@ -6,6 +6,7 @@
 #include "kernel.h"
 #include "json_utils.h"
 #include "profile_builder.h"
+#include "wire_builder.h"
 
 // OCCT foundation
 #include <Standard_Version.hxx>
@@ -37,8 +38,12 @@
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepFeat_MakeDPrism.hxx>
 #include <BRepFeat_MakeRevol.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
@@ -72,6 +77,10 @@
 #include <Geom_Surface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BezierCurve.hxx>
+#include <Approx_ParametrizationType.hxx>
+#include <GeomAbs_Shape.hxx>
+#include <BRepBuilderAPI_TransitionMode.hxx>
+#include <BRepFill_TypeOfContact.hxx>
 
 // STEP import/export
 #include <STEPControl_Reader.hxx>
@@ -218,6 +227,77 @@ struct StructuredRevolveSpec {
     std::vector<StructuredRevolveSlidingEdge> slidingEdges;
 };
 
+enum class StructuredSweepTrihedronMode {
+    CorrectedFrenet,
+    Frenet,
+    Discrete,
+    FixedTrihedron,
+    FixedBinormal,
+    AuxiliarySpine,
+};
+
+struct StructuredSweepSpec {
+    PlaneFrame plane;
+    std::string spineJson;
+    StructuredSweepTrihedronMode trihedronMode = StructuredSweepTrihedronMode::CorrectedFrenet;
+    PlaneFrame trihedronFrame;
+    gp_Dir binormal = gp_Dir(0.0, 0.0, 1.0);
+    std::string auxiliarySpineJson;
+    bool curvilinearEquivalence = true;
+    BRepFill_TypeOfContact auxiliaryContact = BRepFill_NoContact;
+    bool sectionWithContact = false;
+    bool sectionWithCorrection = false;
+    bool solid = true;
+    bool forceApproxC1 = false;
+    BRepBuilderAPI_TransitionMode transitionMode = BRepBuilderAPI_Transformed;
+    bool hasTolerance = false;
+    double tol3d = 1.0e-4;
+    double boundTol = 1.0e-4;
+    double angularTol = 1.0e-2;
+    bool hasMaxDegree = false;
+    int maxDegree = 0;
+    bool hasMaxSegments = false;
+    int maxSegments = 0;
+    bool cut = false;
+};
+
+enum class StructuredLoftSectionKind {
+    Profile,
+    Wire,
+    Point,
+};
+
+struct StructuredLoftSection {
+    StructuredLoftSectionKind kind = StructuredLoftSectionKind::Profile;
+    std::string profileJson;
+    PlaneFrame plane;
+    std::string wireJson;
+    gp_Pnt point = gp_Pnt(0.0, 0.0, 0.0);
+};
+
+struct StructuredLoftSpec {
+    bool solid = true;
+    bool ruled = false;
+    double pres3d = 1.0e-6;
+    bool hasCheckCompatibility = false;
+    bool checkCompatibility = true;
+    bool hasSmoothing = false;
+    bool smoothing = false;
+    bool hasParametrization = false;
+    Approx_ParametrizationType parametrization = Approx_ChordLength;
+    bool hasContinuity = false;
+    GeomAbs_Shape continuity = GeomAbs_C2;
+    bool hasCriteriumWeight = false;
+    double criteriumWeight1 = 1.0;
+    double criteriumWeight2 = 1.0;
+    double criteriumWeight3 = 1.0;
+    bool hasMaxDegree = false;
+    int maxDegree = 0;
+    bool hasMutableInput = false;
+    bool mutableInput = true;
+    bool cut = false;
+};
+
 struct RevolveOptions {
     double angleDegrees = 0.0;
     gp_Pnt axisOrigin = gp_Pnt(0.0, 0.0, 0.0);
@@ -236,6 +316,15 @@ struct ShapeTransformOptions {
     gp_Vec translation = gp_Vec(0.0, 0.0, 0.0);
     RotationOptions rotation;
 };
+
+void throwStructuredValidation(const std::string& operation,
+                               const std::string& path,
+                               const std::string& reason,
+                               const std::string& unsupportedFeature);
+
+void throwStructuredOperationError(const std::string& operation,
+                                   const std::string& reason,
+                                   const std::vector<std::string>& edgeRefs);
 
 double requireFiniteNumber(double value, const std::string& name)
 {
@@ -391,6 +480,57 @@ TopoDS_Face placeProfileFace(const TopoDS_Face& sourceFace, const PlaneFrame& pl
     return TopoDS::Face(applyShapeTransform(sourceFace, transform, "profile placement"));
 }
 
+TopoDS_Wire placeProfileWire(const TopoDS_Wire& sourceWire, const PlaneFrame& plane)
+{
+    if (!plane.hasValue) {
+        return sourceWire;
+    }
+
+    gp_Trsf transform;
+    transform.SetDisplacement(
+        gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0), gp_Dir(1.0, 0.0, 0.0)),
+        gp_Ax3(plane.origin, plane.normal, plane.xDirection)
+    );
+
+    return TopoDS::Wire(applyShapeTransform(sourceWire, transform, "profile placement"));
+}
+
+void requireSingleWireProfile(const std::string& profileJson,
+                              const std::string& operation,
+                              const std::string& path)
+{
+    const mini_json::Value root = mini_json::requireObject(mini_json::parse(profileJson), path + " profile");
+    const mini_json::Value& wires = mini_json::requireArray(mini_json::requireMember(root, "wires", path), path + ".wires");
+    if (wires.array.size() != 1) {
+        throwStructuredValidation(operation,
+                                  path,
+                                  "Only single closed-wire sections are supported for this operation",
+                                  "profile.multiWireSections");
+    }
+}
+
+TopoDS_Shape composeFeatureWithBase(const TopoDS_Shape& baseShape,
+                                    const TopoDS_Shape& featureShape,
+                                    bool cut,
+                                    const std::string& operation)
+{
+    if (cut) {
+        BRepAlgoAPI_Cut booleanOp(baseShape, featureShape);
+        booleanOp.Build();
+        if (!booleanOp.IsDone() || booleanOp.Shape().IsNull()) {
+            throwStructuredOperationError(operation, "Boolean cut failed for the built feature", {});
+        }
+        return booleanOp.Shape();
+    }
+
+    BRepAlgoAPI_Fuse booleanOp(baseShape, featureShape);
+    booleanOp.Build();
+    if (!booleanOp.IsDone() || booleanOp.Shape().IsNull()) {
+        throwStructuredOperationError(operation, "Boolean fuse failed for the built feature", {});
+    }
+    return booleanOp.Shape();
+}
+
 gp_Vec makeExtrusionVector(const ExtrudeOptions& options)
 {
     if (options.hasVector) {
@@ -511,7 +651,7 @@ std::string fnv1a64(const std::string& input) {
 
 std::array<double, 6> boundsOfShape(const TopoDS_Shape& shape) {
     Bnd_Box bbox;
-    BRepBndLib::Add(shape, bbox);
+    BRepBndLib::AddOptimal(shape, bbox, true, false);
     if (bbox.IsVoid()) {
         return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     }
@@ -1270,6 +1410,295 @@ StructuredRevolveSpec parseStructuredRevolveSpec(const std::string& specJson,
         throwStructuredValidation(operation,
                                   pathRoot + ".extent.type",
                                   "Unsupported extent type");
+    }
+
+    return spec;
+}
+
+StructuredSweepSpec parseStructuredSweepSpec(const std::string& specJson,
+                                             const std::string& operation,
+                                             const std::string& pathRoot) {
+    const mini_json::Value root = mini_json::requireObject(mini_json::parse(specJson), pathRoot + " spec");
+    requireSchemaVersion(root, operation);
+    const bool allowUnknownFields = optionalBoolMember(root, "allowUnknownFields", false);
+    rejectUnknownFields(root,
+                        { "schemaVersion", "allowUnknownFields", "unit", "plane", "spineJson", "trihedronMode", "sectionWithContact", "sectionWithCorrection", "solid", "forceApproxC1", "transitionMode", "tolerance", "maxDegree", "maxSegments", "cut", "metadata" },
+                        operation,
+                        pathRoot,
+                        allowUnknownFields);
+
+    if (const mini_json::Value* unitValue = root.get("unit")) {
+        const mini_json::Value& unit = mini_json::requireObject(*unitValue, pathRoot + ".unit");
+        rejectUnknownFields(unit, { "length", "angle" }, operation, pathRoot + ".unit", allowUnknownFields);
+        if (hasMember(unit, "length") && optionalStringMember(unit, "length") != "model") {
+            throwStructuredValidation(operation, pathRoot + ".unit.length", "Only model length units are supported");
+        }
+        if (hasMember(unit, "angle")) {
+            const std::string angleUnit = optionalStringMember(unit, "angle");
+            if (angleUnit != "radians" && angleUnit != "degrees") {
+                throwStructuredValidation(operation, pathRoot + ".unit.angle", "Angle unit must be radians or degrees");
+            }
+        }
+    }
+
+    StructuredSweepSpec spec;
+    if (const mini_json::Value* planeValue = root.get("plane")) {
+        spec.plane = parsePlaneFrame(mini_json::requireObject(*planeValue, pathRoot + ".plane"));
+    }
+
+    spec.spineJson = mini_json::requireString(mini_json::requireMember(root, "spineJson", pathRoot), pathRoot + ".spineJson");
+    spec.sectionWithContact = optionalBoolMember(root, "sectionWithContact", false);
+    spec.sectionWithCorrection = optionalBoolMember(root, "sectionWithCorrection", false);
+    spec.solid = !hasMember(root, "solid") || optionalBoolMember(root, "solid", true);
+    spec.forceApproxC1 = optionalBoolMember(root, "forceApproxC1", false);
+    spec.cut = optionalBoolMember(root, "cut", false);
+
+    if (spec.cut && !spec.solid) {
+        throwStructuredValidation(operation,
+                                  pathRoot + ".solid",
+                                  "Cut sweep operations require solid sections");
+    }
+
+    if (hasMember(root, "transitionMode")) {
+        const std::string transitionMode = optionalStringMember(root, "transitionMode");
+        if (transitionMode == "transformed") {
+            spec.transitionMode = BRepBuilderAPI_Transformed;
+        } else if (transitionMode == "rightCorner") {
+            spec.transitionMode = BRepBuilderAPI_RightCorner;
+        } else if (transitionMode == "roundCorner") {
+            spec.transitionMode = BRepBuilderAPI_RoundCorner;
+        } else {
+            throwStructuredValidation(operation,
+                                      pathRoot + ".transitionMode",
+                                      "Unsupported sweep transition mode");
+        }
+    }
+
+    if (const mini_json::Value* toleranceValue = root.get("tolerance")) {
+        const mini_json::Value& tolerance = mini_json::requireObject(*toleranceValue, pathRoot + ".tolerance");
+        rejectUnknownFields(tolerance, { "tol3d", "boundTol", "angularTol" }, operation, pathRoot + ".tolerance", allowUnknownFields);
+        spec.hasTolerance = true;
+        if (hasMember(tolerance, "tol3d")) {
+            spec.tol3d = requirePositiveMember(tolerance, "tol3d", operation, pathRoot + ".tolerance.tol3d");
+        }
+        if (hasMember(tolerance, "boundTol")) {
+            spec.boundTol = requirePositiveMember(tolerance, "boundTol", operation, pathRoot + ".tolerance.boundTol");
+        }
+        if (hasMember(tolerance, "angularTol")) {
+            spec.angularTol = requirePositiveMember(tolerance, "angularTol", operation, pathRoot + ".tolerance.angularTol");
+        }
+    }
+
+    if (hasMember(root, "maxDegree")) {
+        spec.hasMaxDegree = true;
+        spec.maxDegree = requirePositiveIntMember(root, "maxDegree", operation, pathRoot + ".maxDegree");
+    }
+    if (hasMember(root, "maxSegments")) {
+        spec.hasMaxSegments = true;
+        spec.maxSegments = requirePositiveIntMember(root, "maxSegments", operation, pathRoot + ".maxSegments");
+    }
+
+    if (const mini_json::Value* trihedronModeValue = root.get("trihedronMode")) {
+        const mini_json::Value& trihedronMode = mini_json::requireObject(*trihedronModeValue, pathRoot + ".trihedronMode");
+        const std::string trihedronType = optionalStringMember(trihedronMode, "type");
+        if (trihedronType.empty()) {
+            throwStructuredValidation(operation, pathRoot + ".trihedronMode.type", "Trihedron mode type is required");
+        }
+
+        if (trihedronType == "correctedFrenet") {
+            rejectUnknownFields(trihedronMode, { "type" }, operation, pathRoot + ".trihedronMode", allowUnknownFields);
+            spec.trihedronMode = StructuredSweepTrihedronMode::CorrectedFrenet;
+        } else if (trihedronType == "frenet") {
+            rejectUnknownFields(trihedronMode, { "type" }, operation, pathRoot + ".trihedronMode", allowUnknownFields);
+            spec.trihedronMode = StructuredSweepTrihedronMode::Frenet;
+        } else if (trihedronType == "discrete") {
+            rejectUnknownFields(trihedronMode, { "type" }, operation, pathRoot + ".trihedronMode", allowUnknownFields);
+            spec.trihedronMode = StructuredSweepTrihedronMode::Discrete;
+        } else if (trihedronType == "fixedTrihedron") {
+            rejectUnknownFields(trihedronMode, { "type", "frame" }, operation, pathRoot + ".trihedronMode", allowUnknownFields);
+            spec.trihedronMode = StructuredSweepTrihedronMode::FixedTrihedron;
+            spec.trihedronFrame = parsePlaneFrame(mini_json::requireObject(mini_json::requireMember(trihedronMode, "frame", pathRoot + ".trihedronMode"), pathRoot + ".trihedronMode.frame"));
+        } else if (trihedronType == "fixedBinormal") {
+            rejectUnknownFields(trihedronMode, { "type", "binormal" }, operation, pathRoot + ".trihedronMode", allowUnknownFields);
+            spec.trihedronMode = StructuredSweepTrihedronMode::FixedBinormal;
+            spec.binormal = parseDirection3(mini_json::requireMember(trihedronMode, "binormal", pathRoot + ".trihedronMode"), pathRoot + ".trihedronMode.binormal");
+        } else if (trihedronType == "auxiliarySpine") {
+            rejectUnknownFields(trihedronMode, { "type", "spineJson", "curvilinearEquivalence", "contact" }, operation, pathRoot + ".trihedronMode", allowUnknownFields);
+            spec.trihedronMode = StructuredSweepTrihedronMode::AuxiliarySpine;
+            spec.auxiliarySpineJson = mini_json::requireString(mini_json::requireMember(trihedronMode, "spineJson", pathRoot + ".trihedronMode"), pathRoot + ".trihedronMode.spineJson");
+            spec.curvilinearEquivalence = !hasMember(trihedronMode, "curvilinearEquivalence") || optionalBoolMember(trihedronMode, "curvilinearEquivalence", true);
+            if (hasMember(trihedronMode, "contact")) {
+                const std::string contact = optionalStringMember(trihedronMode, "contact");
+                if (contact == "none") {
+                    spec.auxiliaryContact = BRepFill_NoContact;
+                } else if (contact == "contact") {
+                    spec.auxiliaryContact = BRepFill_Contact;
+                } else if (contact == "contactOnBorder") {
+                    spec.auxiliaryContact = BRepFill_ContactOnBorder;
+                } else {
+                    throwStructuredValidation(operation,
+                                              pathRoot + ".trihedronMode.contact",
+                                              "Unsupported auxiliary-spine contact mode");
+                }
+            }
+        } else {
+            throwStructuredValidation(operation,
+                                      pathRoot + ".trihedronMode.type",
+                                      "Unsupported trihedron mode");
+        }
+    }
+
+    return spec;
+}
+
+std::vector<StructuredLoftSection> parseStructuredLoftSections(const std::string& sectionsJson,
+                                                               bool allowUnknownFields,
+                                                               const std::string& operation,
+                                                               const std::string& pathRoot) {
+    const mini_json::Value sections = mini_json::requireArray(mini_json::parse(sectionsJson), pathRoot + ".sections");
+    if (sections.array.size() < 2) {
+        throwStructuredValidation(operation, pathRoot + ".sections", "At least two loft sections are required");
+    }
+
+    std::vector<StructuredLoftSection> result;
+    result.reserve(sections.array.size());
+    for (std::size_t index = 0; index < sections.array.size(); ++index) {
+        const std::string sectionPath = pathRoot + ".sections[" + std::to_string(index) + "]";
+        const mini_json::Value& section = mini_json::requireObject(sections.array[index], sectionPath);
+        const std::string type = optionalStringMember(section, "type");
+        if (type.empty()) {
+            throwStructuredValidation(operation, sectionPath + ".type", "Section type is required");
+        }
+
+        StructuredLoftSection entry;
+        if (type == "profile") {
+            rejectUnknownFields(section, { "type", "profileJson", "plane" }, operation, sectionPath, allowUnknownFields);
+            entry.kind = StructuredLoftSectionKind::Profile;
+            entry.profileJson = mini_json::requireString(mini_json::requireMember(section, "profileJson", sectionPath), sectionPath + ".profileJson");
+            if (const mini_json::Value* planeValue = section.get("plane")) {
+                entry.plane = parsePlaneFrame(mini_json::requireObject(*planeValue, sectionPath + ".plane"));
+            }
+        } else if (type == "wire") {
+            rejectUnknownFields(section, { "type", "wireJson" }, operation, sectionPath, allowUnknownFields);
+            entry.kind = StructuredLoftSectionKind::Wire;
+            entry.wireJson = mini_json::requireString(mini_json::requireMember(section, "wireJson", sectionPath), sectionPath + ".wireJson");
+        } else if (type == "point") {
+            rejectUnknownFields(section, { "type", "point" }, operation, sectionPath, allowUnknownFields);
+            entry.kind = StructuredLoftSectionKind::Point;
+            entry.point = parsePoint3(mini_json::requireMember(section, "point", sectionPath), sectionPath + ".point");
+        } else {
+            throwStructuredValidation(operation, sectionPath + ".type", "Unsupported loft section type");
+        }
+
+        result.push_back(entry);
+    }
+
+    bool hasWireSection = false;
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        if (result[index].kind == StructuredLoftSectionKind::Point) {
+            if (index != 0 && index + 1 != result.size()) {
+                throwStructuredValidation(operation,
+                                          pathRoot + ".sections[" + std::to_string(index) + "]",
+                                          "Point loft sections are only allowed at the start or end");
+            }
+        } else {
+            hasWireSection = true;
+        }
+    }
+    if (!hasWireSection) {
+        throwStructuredValidation(operation, pathRoot + ".sections", "At least one wire/profile section is required");
+    }
+
+    return result;
+}
+
+StructuredLoftSpec parseStructuredLoftSpec(const std::string& specJson,
+                                           const std::string& operation,
+                                           const std::string& pathRoot,
+                                           bool& allowUnknownFields) {
+    const mini_json::Value root = mini_json::requireObject(mini_json::parse(specJson), pathRoot + " spec");
+    requireSchemaVersion(root, operation);
+    allowUnknownFields = optionalBoolMember(root, "allowUnknownFields", false);
+    rejectUnknownFields(root,
+                        { "schemaVersion", "allowUnknownFields", "solid", "ruled", "pres3d", "checkCompatibility", "smoothing", "parametrization", "continuity", "criteriumWeight", "maxDegree", "mutableInput", "cut", "metadata" },
+                        operation,
+                        pathRoot,
+                        allowUnknownFields);
+
+    StructuredLoftSpec spec;
+    spec.solid = !hasMember(root, "solid") || optionalBoolMember(root, "solid", true);
+    spec.ruled = optionalBoolMember(root, "ruled", false);
+    spec.cut = optionalBoolMember(root, "cut", false);
+    if (hasMember(root, "pres3d")) {
+        spec.pres3d = requirePositiveMember(root, "pres3d", operation, pathRoot + ".pres3d");
+    }
+    if (spec.cut && !spec.solid) {
+        throwStructuredValidation(operation,
+                                  pathRoot + ".solid",
+                                  "Cut loft operations require solid sections");
+    }
+
+    if (hasMember(root, "checkCompatibility")) {
+        spec.hasCheckCompatibility = true;
+        spec.checkCompatibility = optionalBoolMember(root, "checkCompatibility", true);
+    }
+    if (hasMember(root, "smoothing")) {
+        spec.hasSmoothing = true;
+        spec.smoothing = optionalBoolMember(root, "smoothing", false);
+    }
+    if (hasMember(root, "parametrization")) {
+        spec.hasParametrization = true;
+        const std::string parametrization = optionalStringMember(root, "parametrization");
+        if (parametrization == "chordLength") {
+            spec.parametrization = Approx_ChordLength;
+        } else if (parametrization == "centripetal") {
+            spec.parametrization = Approx_Centripetal;
+        } else if (parametrization == "isoParametric") {
+            spec.parametrization = Approx_IsoParametric;
+        } else {
+            throwStructuredValidation(operation,
+                                      pathRoot + ".parametrization",
+                                      "Unsupported loft parametrization mode");
+        }
+    }
+    if (hasMember(root, "continuity")) {
+        spec.hasContinuity = true;
+        const std::string continuity = optionalStringMember(root, "continuity");
+        if (continuity == "C0") {
+            spec.continuity = GeomAbs_C0;
+        } else if (continuity == "G1") {
+            spec.continuity = GeomAbs_G1;
+        } else if (continuity == "C1") {
+            spec.continuity = GeomAbs_C1;
+        } else if (continuity == "G2") {
+            spec.continuity = GeomAbs_G2;
+        } else if (continuity == "C2") {
+            spec.continuity = GeomAbs_C2;
+        } else if (continuity == "C3") {
+            spec.continuity = GeomAbs_C3;
+        } else if (continuity == "CN") {
+            spec.continuity = GeomAbs_CN;
+        } else {
+            throwStructuredValidation(operation,
+                                      pathRoot + ".continuity",
+                                      "Unsupported loft continuity mode");
+        }
+    }
+    if (const mini_json::Value* weightsValue = root.get("criteriumWeight")) {
+        const mini_json::Value& weights = mini_json::requireObject(*weightsValue, pathRoot + ".criteriumWeight");
+        rejectUnknownFields(weights, { "w1", "w2", "w3" }, operation, pathRoot + ".criteriumWeight", allowUnknownFields);
+        spec.hasCriteriumWeight = true;
+        spec.criteriumWeight1 = requirePositiveMember(weights, "w1", operation, pathRoot + ".criteriumWeight.w1");
+        spec.criteriumWeight2 = requirePositiveMember(weights, "w2", operation, pathRoot + ".criteriumWeight.w2");
+        spec.criteriumWeight3 = requirePositiveMember(weights, "w3", operation, pathRoot + ".criteriumWeight.w3");
+    }
+    if (hasMember(root, "maxDegree")) {
+        spec.hasMaxDegree = true;
+        spec.maxDegree = requirePositiveIntMember(root, "maxDegree", operation, pathRoot + ".maxDegree");
+    }
+    if (hasMember(root, "mutableInput")) {
+        spec.hasMutableInput = true;
+        spec.mutableInput = optionalBoolMember(root, "mutableInput", true);
     }
 
     return spec;
@@ -2561,6 +2990,179 @@ uint32_t OcctKernel::revolveCutProfileWithSpec(uint32_t id, const std::string& p
     return 0;
 }
 
+uint32_t OcctKernel::performStructuredSweepFeature(uint32_t id,
+                                                   const std::string& profileJson,
+                                                   const std::string& specJson,
+                                                   const std::string& operationType) {
+    auto sourceIt = _impl->records.find(id);
+    if (sourceIt == _impl->records.end()) {
+        throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+    }
+
+    const StructuredSweepSpec spec = parseStructuredSweepSpec(specJson, operationType, "sweep");
+    const TopoDS_Shape& baseShape = sourceIt->second.shape;
+    const RevisionMetadata* baseRevision = &sourceIt->second.revision;
+
+    requireSingleWireProfile(profileJson, operationType, "profile");
+    const TopoDS_Wire profileWire = placeProfileWire(buildWireFromProfile(profileJson), spec.plane);
+    const TopoDS_Wire spine = buildSpatialWireFromJson(spec.spineJson, false);
+
+    BRepOffsetAPI_MakePipeShell pipe(spine);
+    switch (spec.trihedronMode) {
+    case StructuredSweepTrihedronMode::CorrectedFrenet:
+        pipe.SetMode(false);
+        break;
+    case StructuredSweepTrihedronMode::Frenet:
+        pipe.SetMode(true);
+        break;
+    case StructuredSweepTrihedronMode::Discrete:
+        pipe.SetDiscreteMode();
+        break;
+    case StructuredSweepTrihedronMode::FixedTrihedron:
+        pipe.SetMode(gp_Ax2(spec.trihedronFrame.origin, spec.trihedronFrame.normal, spec.trihedronFrame.xDirection));
+        break;
+    case StructuredSweepTrihedronMode::FixedBinormal:
+        pipe.SetMode(spec.binormal);
+        break;
+    case StructuredSweepTrihedronMode::AuxiliarySpine: {
+        const TopoDS_Wire auxiliarySpine = buildSpatialWireFromJson(spec.auxiliarySpineJson, false);
+        pipe.SetMode(auxiliarySpine, spec.curvilinearEquivalence, spec.auxiliaryContact);
+        break;
+    }
+    }
+
+    pipe.Add(profileWire, spec.sectionWithContact, spec.sectionWithCorrection);
+    if (spec.hasTolerance) {
+        pipe.SetTolerance(spec.tol3d, spec.boundTol, spec.angularTol);
+    }
+    if (spec.hasMaxDegree) {
+        pipe.SetMaxDegree(spec.maxDegree);
+    }
+    if (spec.hasMaxSegments) {
+        pipe.SetMaxSegments(spec.maxSegments);
+    }
+    pipe.SetForceApproxC1(spec.forceApproxC1);
+    pipe.SetTransitionMode(spec.transitionMode);
+    pipe.Build();
+    if (!pipe.IsDone() || pipe.Shape().IsNull()) {
+        throwStructuredOperationError(operationType, "Sweep build failed");
+    }
+    if (spec.solid && !pipe.MakeSolid()) {
+        throwStructuredOperationError(operationType, "Sweep profile could not be converted into a solid");
+    }
+
+    const TopoDS_Shape resultShape = composeFeatureWithBase(baseShape, pipe.Shape(), spec.cut, operationType);
+    return storeShapeWithMetadata(resultShape,
+                                  operationType,
+                                  "source=" + baseRevision->revisionId + ";" + profileJson + "|" + specJson,
+                                  { baseRevision->revisionId },
+                                  "unresolved",
+                                  "unresolved",
+                                  { "Structured sweep lineage is composed from an exact builder plus boolean feature composition; generated/modified/deleted identity is reported as unresolved" });
+}
+
+uint32_t OcctKernel::sweepProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson) {
+    try {
+        const mini_json::Value specRoot = mini_json::requireObject(mini_json::parse(specJson), "sweep spec");
+        const std::string operationType = optionalBoolMember(specRoot, "cut", false) ? "sweepCutProfile" : "sweepProfile";
+        return performStructuredSweepFeature(id, profileJson, specJson, operationType);
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return 0;
+}
+
+uint32_t OcctKernel::performStructuredLoftFeature(uint32_t id,
+                                                  const std::string& sectionsJson,
+                                                  const std::string& specJson,
+                                                  const std::string& operationType) {
+    auto sourceIt = _impl->records.find(id);
+    if (sourceIt == _impl->records.end()) {
+        throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+    }
+
+    bool allowUnknownFields = false;
+    const StructuredLoftSpec spec = parseStructuredLoftSpec(specJson, operationType, "loft", allowUnknownFields);
+    const std::vector<StructuredLoftSection> sections = parseStructuredLoftSections(sectionsJson,
+                                                                                    allowUnknownFields,
+                                                                                    operationType,
+                                                                                    "loft");
+    const TopoDS_Shape& baseShape = sourceIt->second.shape;
+    const RevisionMetadata* baseRevision = &sourceIt->second.revision;
+
+    BRepOffsetAPI_ThruSections loft(spec.solid, spec.ruled, spec.pres3d);
+    if (spec.hasCheckCompatibility) {
+        loft.CheckCompatibility(spec.checkCompatibility);
+    }
+    if (spec.hasSmoothing) {
+        loft.SetSmoothing(spec.smoothing);
+    }
+    if (spec.hasParametrization) {
+        loft.SetParType(spec.parametrization);
+    }
+    if (spec.hasContinuity) {
+        loft.SetContinuity(spec.continuity);
+    }
+    if (spec.hasCriteriumWeight) {
+        loft.SetCriteriumWeight(spec.criteriumWeight1, spec.criteriumWeight2, spec.criteriumWeight3);
+    }
+    if (spec.hasMaxDegree) {
+        loft.SetMaxDegree(spec.maxDegree);
+    }
+    if (spec.hasMutableInput) {
+        loft.SetMutableInput(spec.mutableInput);
+    }
+
+    for (std::size_t index = 0; index < sections.size(); ++index) {
+        const StructuredLoftSection& section = sections[index];
+        switch (section.kind) {
+        case StructuredLoftSectionKind::Profile: {
+            requireSingleWireProfile(section.profileJson,
+                                     operationType,
+                                     "loft.sections[" + std::to_string(index) + "]");
+            const TopoDS_Wire wire = placeProfileWire(buildWireFromProfile(section.profileJson), section.plane);
+            loft.AddWire(wire);
+            break;
+        }
+        case StructuredLoftSectionKind::Wire:
+            loft.AddWire(buildSpatialWireFromJson(section.wireJson, true));
+            break;
+        case StructuredLoftSectionKind::Point:
+            loft.AddVertex(BRepBuilderAPI_MakeVertex(section.point).Vertex());
+            break;
+        }
+    }
+
+    loft.Build();
+    if (!loft.IsDone() || loft.Shape().IsNull()) {
+        throwStructuredOperationError(operationType, "Loft build failed");
+    }
+
+    const TopoDS_Shape resultShape = composeFeatureWithBase(baseShape, loft.Shape(), spec.cut, operationType);
+    return storeShapeWithMetadata(resultShape,
+                                  operationType,
+                                  "source=" + baseRevision->revisionId + ";" + sectionsJson + "|" + specJson,
+                                  { baseRevision->revisionId },
+                                  "unresolved",
+                                  "unresolved",
+                                  { "Structured loft lineage is composed from an exact builder plus boolean feature composition; generated/modified/deleted identity is reported as unresolved" });
+}
+
+uint32_t OcctKernel::loftWithSpec(uint32_t id, const std::string& sectionsJson, const std::string& specJson) {
+    try {
+        const mini_json::Value specRoot = mini_json::requireObject(mini_json::parse(specJson), "loft spec");
+        const std::string operationType = optionalBoolMember(specRoot, "cut", false) ? "loftCut" : "loft";
+        return performStructuredLoftFeature(id, sectionsJson, specJson, operationType);
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Booleans
 // ---------------------------------------------------------------------------
@@ -3188,7 +3790,7 @@ std::string OcctKernel::getTopology(uint32_t id) {
         }
 
         Bnd_Box bbox;
-        BRepBndLib::Add(shape, bbox);
+        BRepBndLib::AddOptimal(shape, bbox, true, false);
         double xMin, yMin, zMin, xMax, yMax, zMax;
         bbox.Get(xMin, yMin, zMin, xMax, yMax, zMax);
 
@@ -3680,6 +4282,8 @@ std::string OcctKernel::getOperationSchema() const {
         "\"extrudeCutProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"direction\":true,\"draft\":true,\"plane\":true,\"reverseDirection\":true,\"endConditions\":[\"blind\",\"upToNext\",\"throughAll\",\"upToSurface\",\"offsetFromSurface\"],\"surfaceTarget\":true,\"curvedSurfaceTarget\":true}},"
         "\"revolveProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"plane\":true,\"axis\":true,\"reverseDirection\":true,\"signedAngle\":true,\"endConditions\":[\"angle\",\"upToSurface\",\"fromSurfaceToSurface\",\"throughAll\",\"upToSurfaceAtAngle\"],\"surfaceTarget\":true,\"curvedSurfaceTarget\":true,\"slidingEdges\":true}},"
         "\"revolveCutProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"plane\":true,\"axis\":true,\"reverseDirection\":true,\"signedAngle\":true,\"endConditions\":[\"angle\",\"upToSurface\",\"fromSurfaceToSurface\",\"throughAll\",\"upToSurfaceAtAngle\"],\"surfaceTarget\":true,\"curvedSurfaceTarget\":true,\"slidingEdges\":true}},"
+        "\"sweepProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"cutBoolean\":true,\"plane\":true,\"spine\":true,\"trihedronModes\":[\"correctedFrenet\",\"frenet\",\"discrete\",\"fixedTrihedron\",\"fixedBinormal\",\"auxiliarySpine\"],\"sectionWithContact\":true,\"sectionWithCorrection\":true,\"solid\":true,\"forceApproxC1\":true,\"transitionModes\":[\"transformed\",\"rightCorner\",\"roundCorner\"],\"tolerances\":true,\"maxDegree\":true,\"maxSegments\":true}},"
+        "\"loft\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"cutBoolean\":true,\"sectionKinds\":[\"profile\",\"wire\",\"point\"],\"solid\":true,\"ruled\":true,\"pres3d\":true,\"checkCompatibility\":true,\"smoothing\":true,\"parametrization\":[\"chordLength\",\"centripetal\",\"isoParametric\"],\"continuity\":[\"C0\",\"G1\",\"C1\",\"G2\",\"C2\",\"C3\",\"CN\"],\"criteriumWeight\":true,\"maxDegree\":true,\"mutableInput\":true}},"
         "\"filletEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"constantRadius\":true,\"startEndRadius\":true,\"stationRadii\":true,\"lawRadius\":[\"constant\",\"linear\"],\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"blendShape\":[\"rational\",\"quasiAngular\",\"polynomial\"],\"continuity\":[\"C0\",\"C1\",\"C2\"],\"overflowModes\":[\"fail\"]}},"
         "\"chamferEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"symmetric\":true,\"twoDistance\":true,\"distanceAngle\":true,\"referenceFace\":true,\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"overflowModes\":[\"fail\"]}},"
         "\"evaluateEdge\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
@@ -3756,6 +4360,38 @@ std::string OcctKernel::getCapabilities() const {
         "\"surfaceTarget\":true,"
         "\"curvedSurfaceTarget\":true,"
         "\"slidingEdges\":true"
+        "},"
+        "\"sweepProfile\":{"
+        "\"schemaVersion\":1,"
+        "\"nativeExact\":true,"
+        "\"cutBoolean\":true,"
+        "\"plane\":true,"
+        "\"spine\":true,"
+        "\"trihedronModes\":[\"correctedFrenet\",\"frenet\",\"discrete\",\"fixedTrihedron\",\"fixedBinormal\",\"auxiliarySpine\"],"
+        "\"sectionWithContact\":true,"
+        "\"sectionWithCorrection\":true,"
+        "\"solid\":true,"
+        "\"forceApproxC1\":true,"
+        "\"transitionModes\":[\"transformed\",\"rightCorner\",\"roundCorner\"],"
+        "\"tolerances\":true,"
+        "\"maxDegree\":true,"
+        "\"maxSegments\":true"
+        "},"
+        "\"loft\":{"
+        "\"schemaVersion\":1,"
+        "\"nativeExact\":true,"
+        "\"cutBoolean\":true,"
+        "\"sectionKinds\":[\"profile\",\"wire\",\"point\"],"
+        "\"solid\":true,"
+        "\"ruled\":true,"
+        "\"pres3d\":true,"
+        "\"checkCompatibility\":true,"
+        "\"smoothing\":true,"
+        "\"parametrization\":[\"chordLength\",\"centripetal\",\"isoParametric\"],"
+        "\"continuity\":[\"C0\",\"G1\",\"C1\",\"G2\",\"C2\",\"C3\",\"CN\"],"
+        "\"criteriumWeight\":true,"
+        "\"maxDegree\":true,"
+        "\"mutableInput\":true"
         "},"
         "\"fillet\":{"
         "\"schemaVersion\":1,"

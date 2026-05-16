@@ -81,6 +81,12 @@ public:
     /// Apply a structured subtractive profile revolve feature to a resident shape.
     uint32_t revolveCutProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson);
 
+    /// Apply a structured sweep feature with optional subtractive composition to a resident shape.
+    uint32_t sweepProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson);
+
+    /// Apply a structured loft feature with optional subtractive composition to a resident shape.
+    uint32_t loftWithSpec(uint32_t id, const std::string& sectionsJson, const std::string& specJson);
+
     // -----------------------------------------------------------------------
     // Boolean operations
     // -----------------------------------------------------------------------
@@ -218,6 +224,14 @@ private:
                                              const std::string& specJson,
                                              const std::string& operationType,
                                              int fuseMode);
+    uint32_t performStructuredSweepFeature(uint32_t id,
+                                           const std::string& profileJson,
+                                           const std::string& specJson,
+                                           const std::string& operationType);
+    uint32_t performStructuredLoftFeature(uint32_t id,
+                                          const std::string& sectionsJson,
+                                          const std::string& specJson,
+                                          const std::string& operationType);
     const TopoDS_Shape& requireShape(uint32_t id) const;
     std::string requireRevisionId(uint32_t id) const;
 };

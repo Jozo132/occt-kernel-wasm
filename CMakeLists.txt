@@ -109,6 +109,7 @@ endif()
 set(KERNEL_SOURCES
     cpp/kernel.cpp
     cpp/profile_builder.cpp
+    cpp/wire_builder.cpp
 )
 
 set(BINDING_SOURCES

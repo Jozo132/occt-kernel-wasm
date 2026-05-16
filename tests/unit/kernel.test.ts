@@ -655,6 +655,129 @@ describe('structured profile revolve operations', () => {
     });
 });
 
+describe('structured sweep operations', () => {
+    const profile = {
+        segments: [
+            { type: 'line' as const, start: [0, 0] as [number, number], end: [8, 0] as [number, number] },
+            { type: 'line' as const, start: [8, 0] as [number, number], end: [8, 8] as [number, number] },
+            { type: 'line' as const, start: [8, 8] as [number, number], end: [0, 8] as [number, number] },
+            { type: 'line' as const, start: [0, 8] as [number, number], end: [0, 0] as [number, number] },
+        ],
+    };
+
+    const spine = {
+        segments: [
+            { type: 'line' as const, start: [0, 0, 0] as [number, number, number], end: [0, 0, 20] as [number, number, number] },
+        ],
+    };
+
+    it('applies an additive sweep feature with trihedron controls', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const result = k.sweepProfileWithSpec({
+            shape: box,
+            profile,
+            spec: {
+                schemaVersion: 1,
+                spine,
+                trihedronMode: { type: 'discrete' },
+                sectionWithCorrection: true,
+                solid: true,
+                maxDegree: 9,
+                maxSegments: 16,
+            },
+        });
+
+        expect(result.id).toBeGreaterThan(0);
+        expect(result.id).not.toBe(box.id);
+        expect(k.getRevisionInfo(result).operationType).toBe('sweepFeature');
+    });
+
+    it('cuts a base shape through the sweep cut flag', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const result = k.sweepProfileWithSpec({
+            shape: box,
+            cut: true,
+            profile,
+            spec: {
+                schemaVersion: 1,
+                spine,
+                solid: true,
+            },
+        });
+
+        expect(result.id).toBeGreaterThan(0);
+        expect(k.getRevisionInfo(result).operationType).toBe('sweepCutFeature');
+    });
+});
+
+describe('structured loft operations', () => {
+    const baseProfile = {
+        segments: [
+            { type: 'line' as const, start: [0, 0] as [number, number], end: [6, 0] as [number, number] },
+            { type: 'line' as const, start: [6, 0] as [number, number], end: [6, 6] as [number, number] },
+            { type: 'line' as const, start: [6, 6] as [number, number], end: [0, 6] as [number, number] },
+            { type: 'line' as const, start: [0, 6] as [number, number], end: [0, 0] as [number, number] },
+        ],
+    };
+
+    const topProfile = {
+        segments: [
+            { type: 'line' as const, start: [1, 1] as [number, number], end: [5, 1] as [number, number] },
+            { type: 'line' as const, start: [5, 1] as [number, number], end: [5, 5] as [number, number] },
+            { type: 'line' as const, start: [5, 5] as [number, number], end: [1, 5] as [number, number] },
+            { type: 'line' as const, start: [1, 5] as [number, number], end: [1, 1] as [number, number] },
+        ],
+    };
+
+    it('applies an additive loft feature with mixed section kinds', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const result = k.loftWithSpec({
+            shape: box,
+            sections: [
+                { type: 'profile', profile: baseProfile, plane: { origin: [0, 0, 0], normal: [0, 0, 1], xDirection: [1, 0, 0] } },
+                { type: 'wire', wire: { segments: [{ type: 'line', start: [0, 0, 10], end: [6, 0, 10] }, { type: 'line', start: [6, 0, 10], end: [6, 6, 10] }, { type: 'line', start: [6, 6, 10], end: [0, 6, 10] }, { type: 'line', start: [0, 6, 10], end: [0, 0, 10] }] } },
+                { type: 'point', point: [3, 3, 16] },
+            ],
+            spec: {
+                schemaVersion: 1,
+                solid: true,
+                ruled: false,
+                smoothing: true,
+                parametrization: 'centripetal',
+                continuity: 'C1',
+                maxDegree: 8,
+            },
+        });
+
+        expect(result.id).toBeGreaterThan(0);
+        expect(k.getRevisionInfo(result).operationType).toBe('loftFeature');
+    });
+
+    it('cuts a base shape through the loft cut flag', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const result = k.loftWithSpec({
+            shape: box,
+            cut: true,
+            sections: [
+                { type: 'profile', profile: baseProfile, plane: { origin: [0, 0, 0], normal: [0, 0, 1], xDirection: [1, 0, 0] } },
+                { type: 'profile', profile: topProfile, plane: { origin: [0, 0, 12], normal: [0, 0, 1], xDirection: [1, 0, 0] } },
+            ],
+            spec: {
+                schemaVersion: 1,
+                solid: true,
+                ruled: true,
+            },
+        });
+
+        expect(result.id).toBeGreaterThan(0);
+        expect(k.getRevisionInfo(result).operationType).toBe('loftCutFeature');
+    });
+});
+
 describe('exact subshape evaluation APIs', () => {
     it('evaluates, samples, and describes an edge without tessellation', () => {
         const k = makeKernel();
@@ -745,6 +868,8 @@ describe('getCapabilities', () => {
         expect(capabilities.extrudeCutProfile?.curvedSurfaceTarget).toBe(true);
         expect(capabilities.revolveProfile?.slidingEdges).toBe(true);
         expect(capabilities.revolveCutProfile?.endConditions).toContain('upToSurfaceAtAngle');
+        expect(capabilities.sweepProfile?.cutBoolean).toBe(true);
+        expect(capabilities.loft?.sectionKinds).toContain('point');
         expect(capabilities.fillet?.stationRadii).toBe(true);
         expect(capabilities.fillet?.partialEdges).toBe(false);
         expect(capabilities.chamfer?.distanceAngle).toBe(true);
@@ -760,6 +885,8 @@ describe('getCapabilities', () => {
         expect(schema.operations.extrudeCutProfile).toBeDefined();
         expect(schema.operations.revolveProfile).toBeDefined();
         expect(schema.operations.revolveCutProfile).toBeDefined();
+        expect(schema.operations.sweepProfile).toBeDefined();
+        expect(schema.operations.loft).toBeDefined();
         expect(schema.operations.filletEdges).toBeDefined();
         expect(schema.operations.evaluateFace).toBeDefined();
     });

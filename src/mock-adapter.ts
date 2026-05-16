@@ -48,6 +48,10 @@ interface MockProfile {
     wires: MockProfileWire[];
 }
 
+interface MockSpatialWire {
+    segments: unknown[];
+}
+
 interface MockRotationTransform {
     axisOrigin: [number, number, number];
     axisDirection: [number, number, number];
@@ -115,7 +119,7 @@ export class MockNativeKernel {
             return shape.params.revisionInfo as Record<string, unknown>;
         }
 
-        const unresolved = ['union', 'subtract', 'intersect', 'fillet', 'chamfer', 'extrudeFeature', 'extrudeCutFeature', 'revolveFeature', 'revolveCutFeature'].includes(shape.kind);
+        const unresolved = ['union', 'subtract', 'intersect', 'fillet', 'chamfer', 'extrudeFeature', 'extrudeCutFeature', 'revolveFeature', 'revolveCutFeature', 'sweepFeature', 'sweepCutFeature', 'loftFeature', 'loftCutFeature'].includes(shape.kind);
         const retained = shape.kind === 'transform';
         return {
             revisionId: `rev_mock_${id}`,
@@ -237,6 +241,24 @@ export class MockNativeKernel {
         return profile as MockProfile;
     }
 
+    private _parseSpatialWire(wireJson: string, label: string): MockSpatialWire {
+        const wire = JSON.parse(wireJson) as Partial<MockSpatialWire>;
+        if (!Array.isArray(wire.segments) || wire.segments.length === 0) {
+            throw new KernelError('INVALID_PARAMS', `${label} must include at least one segment`);
+        }
+        for (const [segmentIndex, segment] of wire.segments.entries()) {
+            this._validateSpatialSegment(segment, `${label}.segments[${segmentIndex}]`);
+        }
+        return wire as MockSpatialWire;
+    }
+
+    private _requireSingleWireProfile(profile: MockProfile, label: string): MockProfile {
+        if (profile.wires.length !== 1) {
+            throw new KernelError('INVALID_PARAMS', `${label} must contain exactly one closed wire for this operation`);
+        }
+        return profile;
+    }
+
     private _validateProfileSegment(segment: unknown, label: string): void {
         const candidate = segment as Record<string, unknown>;
         if (!candidate || typeof candidate.type !== 'string') {
@@ -267,6 +289,71 @@ export class MockNativeKernel {
             case 'bspline': {
                 if (!isPointArray(candidate.controlPoints, 2, 2)) {
                     throw new KernelError('INVALID_PARAMS', `${label}.controlPoints must contain at least two 2D points`);
+                }
+                if (!isPositiveInteger(candidate.degree)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.degree must be a positive integer`);
+                }
+                if (!isNumberArray(candidate.knots, 2)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.knots must contain at least two finite numbers`);
+                }
+                if (!Array.isArray(candidate.multiplicities) || candidate.multiplicities.length !== candidate.knots.length || !candidate.multiplicities.every(isPositiveInteger)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.multiplicities must be positive integers matching the knot count`);
+                }
+                for (let index = 1; index < candidate.knots.length; index += 1) {
+                    if (candidate.knots[index] <= candidate.knots[index - 1]) {
+                        throw new KernelError('INVALID_PARAMS', `${label}.knots must be strictly increasing`);
+                    }
+                }
+                const multiplicitySum = (candidate.multiplicities as number[]).reduce((sum, value) => sum + value, 0);
+                if (multiplicitySum - (candidate.degree as number) - 1 !== candidate.controlPoints.length) {
+                    throw new KernelError('INVALID_PARAMS', `${label} has inconsistent controlPoints, degree, and multiplicities`);
+                }
+                break;
+            }
+            default:
+                throw new KernelError('INVALID_PARAMS', `${label}.type is not supported`);
+        }
+    }
+
+    private _validateSpatialSegment(segment: unknown, label: string): void {
+        const candidate = segment as Record<string, unknown>;
+        if (!candidate || typeof candidate.type !== 'string') {
+            throw new KernelError('INVALID_PARAMS', `${label}.type must be a string`);
+        }
+
+        switch (candidate.type) {
+            case 'line':
+                if (!isPoint(candidate.start, 3) || !isPoint(candidate.end, 3)) {
+                    throw new KernelError('INVALID_PARAMS', `${label} must include 3D start and end points`);
+                }
+                break;
+            case 'arc':
+                if (!isPoint(candidate.start, 3) || !isPoint(candidate.mid, 3) || !isPoint(candidate.end, 3)) {
+                    throw new KernelError('INVALID_PARAMS', `${label} must include 3D start, mid, and end points`);
+                }
+                break;
+            case 'circle':
+                if (!isPoint(candidate.center, 3) || !isPoint(candidate.normal, 3)) {
+                    throw new KernelError('INVALID_PARAMS', `${label} must include a 3D center and normal`);
+                }
+                if (isZeroVector(candidate.normal as number[])) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.normal must not be the zero vector`);
+                }
+                if (typeof candidate.radius !== 'number' || !Number.isFinite(candidate.radius) || candidate.radius <= 0) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.radius must be > 0`);
+                }
+                if (candidate.xDirection !== undefined && (!isPoint(candidate.xDirection, 3) || isZeroVector(candidate.xDirection as number[]))) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.xDirection must be a non-zero 3-element array`);
+                }
+                break;
+            case 'bezier':
+                if (!isPointArray(candidate.controlPoints, 3, 2)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.controlPoints must contain at least two 3D points`);
+                }
+                break;
+            case 'bspline': {
+                if (!isPointArray(candidate.controlPoints, 3, 2)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.controlPoints must contain at least two 3D points`);
                 }
                 if (!isPositiveInteger(candidate.degree)) {
                     throw new KernelError('INVALID_PARAMS', `${label}.degree must be a positive integer`);
@@ -609,6 +696,148 @@ export class MockNativeKernel {
         return spec;
     }
 
+    private _parseSweepSpec(specJson: string): Record<string, unknown> {
+        const spec = JSON.parse(specJson) as Record<string, unknown>;
+        if (spec.schemaVersion !== 1) {
+            throw new KernelError('INVALID_PARAMS', 'sweep spec.schemaVersion must be 1');
+        }
+
+        if (typeof spec.spineJson !== 'string') {
+            throw new KernelError('INVALID_PARAMS', 'sweep spec.spineJson must be a string');
+        }
+        this._parseSpatialWire(spec.spineJson, 'sweep spec.spine');
+
+        if (spec.cut === true && spec.solid === false) {
+            throw new KernelError('INVALID_PARAMS', 'sweep cut operations require spec.solid !== false');
+        }
+
+        if (spec.plane !== undefined) {
+            const plane = spec.plane as Record<string, unknown>;
+            if (!isPoint(plane.origin, 3) || !isPoint(plane.normal, 3) || !isPoint(plane.xDirection, 3)) {
+                throw new KernelError('INVALID_PARAMS', 'Plane must include origin, normal, and xDirection');
+            }
+        }
+
+        if (spec.trihedronMode !== undefined) {
+            const trihedronMode = spec.trihedronMode as Record<string, unknown>;
+            switch (trihedronMode.type) {
+                case 'correctedFrenet':
+                case 'frenet':
+                case 'discrete':
+                    break;
+                case 'fixedTrihedron': {
+                    const frame = trihedronMode.frame as Record<string, unknown> | undefined;
+                    if (!frame || !isPoint(frame.origin, 3) || !isPoint(frame.normal, 3) || !isPoint(frame.xDirection, 3)) {
+                        throw new KernelError('INVALID_PARAMS', 'sweep spec.trihedronMode.frame must define origin, normal, and xDirection');
+                    }
+                    break;
+                }
+                case 'fixedBinormal':
+                    if (!isPoint(trihedronMode.binormal, 3) || isZeroVector(trihedronMode.binormal as number[])) {
+                        throw new KernelError('INVALID_PARAMS', 'sweep spec.trihedronMode.binormal must be a non-zero 3-element array');
+                    }
+                    break;
+                case 'auxiliarySpine':
+                    if (typeof trihedronMode.spineJson !== 'string') {
+                        throw new KernelError('INVALID_PARAMS', 'sweep spec.trihedronMode.spineJson must be a string');
+                    }
+                    this._parseSpatialWire(trihedronMode.spineJson, 'sweep spec.trihedronMode.spine');
+                    break;
+                default:
+                    throw new KernelError('INVALID_PARAMS', 'sweep spec.trihedronMode.type is not supported');
+            }
+        }
+
+        if (spec.tolerance !== undefined) {
+            const tolerance = spec.tolerance as Record<string, unknown>;
+            for (const key of ['tol3d', 'boundTol', 'angularTol'] as const) {
+                const value = tolerance[key];
+                if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
+                    throw new KernelError('INVALID_PARAMS', `sweep spec.tolerance.${key} must be > 0`);
+                }
+            }
+        }
+
+        if (spec.maxDegree !== undefined && !isPositiveInteger(spec.maxDegree)) {
+            throw new KernelError('INVALID_PARAMS', 'sweep spec.maxDegree must be a positive integer');
+        }
+        if (spec.maxSegments !== undefined && !isPositiveInteger(spec.maxSegments)) {
+            throw new KernelError('INVALID_PARAMS', 'sweep spec.maxSegments must be a positive integer');
+        }
+
+        return spec;
+    }
+
+    private _parseLoftSections(sectionsJson: string): Record<string, unknown>[] {
+        const sections = JSON.parse(sectionsJson) as Record<string, unknown>[];
+        if (!Array.isArray(sections) || sections.length < 2) {
+            throw new KernelError('INVALID_PARAMS', 'loft sections must contain at least two entries');
+        }
+
+        for (const [index, section] of sections.entries()) {
+            switch (section.type) {
+                case 'profile':
+                    if (typeof section.profileJson !== 'string') {
+                        throw new KernelError('INVALID_PARAMS', `loft sections[${index}].profileJson must be a string`);
+                    }
+                    this._requireSingleWireProfile(this._parseProfile(section.profileJson as string), `loft sections[${index}].profile`);
+                    if (section.plane !== undefined) {
+                        const plane = section.plane as Record<string, unknown>;
+                        if (!isPoint(plane.origin, 3) || !isPoint(plane.normal, 3) || !isPoint(plane.xDirection, 3)) {
+                            throw new KernelError('INVALID_PARAMS', `loft sections[${index}].plane must define origin, normal, and xDirection`);
+                        }
+                    }
+                    break;
+                case 'wire':
+                    if (typeof section.wireJson !== 'string') {
+                        throw new KernelError('INVALID_PARAMS', `loft sections[${index}].wireJson must be a string`);
+                    }
+                    this._parseSpatialWire(section.wireJson as string, `loft sections[${index}].wire`);
+                    break;
+                case 'point':
+                    if (!isPoint(section.point, 3)) {
+                        throw new KernelError('INVALID_PARAMS', `loft sections[${index}].point must be a 3-element array`);
+                    }
+                    break;
+                default:
+                    throw new KernelError('INVALID_PARAMS', `loft sections[${index}].type is not supported`);
+            }
+        }
+
+        return sections;
+    }
+
+    private _parseLoftSpec(specJson: string): Record<string, unknown> {
+        const spec = JSON.parse(specJson) as Record<string, unknown>;
+        if (spec.schemaVersion !== 1) {
+            throw new KernelError('INVALID_PARAMS', 'loft spec.schemaVersion must be 1');
+        }
+
+        if (spec.cut === true && spec.solid === false) {
+            throw new KernelError('INVALID_PARAMS', 'loft cut operations require spec.solid !== false');
+        }
+
+        if (spec.pres3d !== undefined && (typeof spec.pres3d !== 'number' || !Number.isFinite(spec.pres3d) || spec.pres3d <= 0)) {
+            throw new KernelError('INVALID_PARAMS', 'loft spec.pres3d must be > 0');
+        }
+
+        if (spec.maxDegree !== undefined && !isPositiveInteger(spec.maxDegree)) {
+            throw new KernelError('INVALID_PARAMS', 'loft spec.maxDegree must be a positive integer');
+        }
+
+        if (spec.criteriumWeight !== undefined) {
+            const weights = spec.criteriumWeight as Record<string, unknown>;
+            for (const key of ['w1', 'w2', 'w3'] as const) {
+                const value = weights[key];
+                if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+                    throw new KernelError('INVALID_PARAMS', `loft spec.criteriumWeight.${key} must be > 0`);
+                }
+            }
+        }
+
+        return spec;
+    }
+
     private _parseShapeTransform(transformJson: string): MockShapeTransform {
         const transform = JSON.parse(transformJson) as MockShapeTransform;
         if (transform.translation !== undefined) {
@@ -673,6 +902,20 @@ export class MockNativeKernel {
         const profile = this._parseProfile(profileJson);
         const spec = this._parseRevolveSpec(specJson);
         return this._store('revolveCutFeature', { id, profile, spec });
+    }
+
+    sweepProfileWithSpec(id: number, profileJson: string, specJson: string): number {
+        this._require(id);
+        const profile = this._requireSingleWireProfile(this._parseProfile(profileJson), 'profile');
+        const spec = this._parseSweepSpec(specJson);
+        return this._store(spec.cut === true ? 'sweepCutFeature' : 'sweepFeature', { id, profile, spec });
+    }
+
+    loftWithSpec(id: number, sectionsJson: string, specJson: string): number {
+        this._require(id);
+        const sections = this._parseLoftSections(sectionsJson);
+        const spec = this._parseLoftSpec(specJson);
+        return this._store(spec.cut === true ? 'loftCutFeature' : 'loftFeature', { id, sections, spec });
     }
 
     // -- Booleans --
@@ -945,6 +1188,44 @@ export class MockNativeKernel {
                         slidingEdges: true,
                     },
                 },
+                sweepProfile: {
+                    schemaVersion: 1,
+                    nativeExact: true,
+                    requiresMeshFallback: false,
+                    supports: {
+                        cutBoolean: true,
+                        plane: true,
+                        spine: true,
+                        trihedronModes: ['correctedFrenet', 'frenet', 'discrete', 'fixedTrihedron', 'fixedBinormal', 'auxiliarySpine'],
+                        sectionWithContact: true,
+                        sectionWithCorrection: true,
+                        solid: true,
+                        forceApproxC1: true,
+                        transitionModes: ['transformed', 'rightCorner', 'roundCorner'],
+                        tolerances: true,
+                        maxDegree: true,
+                        maxSegments: true,
+                    },
+                },
+                loft: {
+                    schemaVersion: 1,
+                    nativeExact: true,
+                    requiresMeshFallback: false,
+                    supports: {
+                        cutBoolean: true,
+                        sectionKinds: ['profile', 'wire', 'point'],
+                        solid: true,
+                        ruled: true,
+                        pres3d: true,
+                        checkCompatibility: true,
+                        smoothing: true,
+                        parametrization: ['chordLength', 'centripetal', 'isoParametric'],
+                        continuity: ['C0', 'G1', 'C1', 'G2', 'C2', 'C3', 'CN'],
+                        criteriumWeight: true,
+                        maxDegree: true,
+                        mutableInput: true,
+                    },
+                },
                 filletEdges: { schemaVersion: 1, nativeExact: true },
                 chamferEdges: { schemaVersion: 1, nativeExact: true },
                 evaluateEdge: { schemaVersion: 1, nativeExact: true },
@@ -1021,6 +1302,38 @@ export class MockNativeKernel {
                 surfaceTarget: true,
                 curvedSurfaceTarget: true,
                 slidingEdges: true,
+            },
+            sweepProfile: {
+                schemaVersion: 1,
+                nativeExact: true,
+                cutBoolean: true,
+                plane: true,
+                spine: true,
+                trihedronModes: ['correctedFrenet', 'frenet', 'discrete', 'fixedTrihedron', 'fixedBinormal', 'auxiliarySpine'],
+                sectionWithContact: true,
+                sectionWithCorrection: true,
+                solid: true,
+                forceApproxC1: true,
+                transitionModes: ['transformed', 'rightCorner', 'roundCorner'],
+                tolerances: true,
+                maxDegree: true,
+                maxSegments: true,
+            },
+            loft: {
+                schemaVersion: 1,
+                nativeExact: true,
+                cutBoolean: true,
+                sectionKinds: ['profile', 'wire', 'point'],
+                solid: true,
+                ruled: true,
+                pres3d: true,
+                checkCompatibility: true,
+                smoothing: true,
+                parametrization: ['chordLength', 'centripetal', 'isoParametric'],
+                continuity: ['C0', 'G1', 'C1', 'G2', 'C2', 'C3', 'CN'],
+                criteriumWeight: true,
+                maxDegree: true,
+                mutableInput: true,
             },
             fillet: {
                 schemaVersion: 1,

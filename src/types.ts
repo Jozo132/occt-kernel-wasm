@@ -123,6 +123,51 @@ export interface Profile {
     readonly wires?: readonly ProfileWire[];
 }
 
+export type SpatialCurveSegmentLine = {
+    readonly type: 'line';
+    readonly start: Point3;
+    readonly end: Point3;
+};
+
+export type SpatialCurveSegmentArc = {
+    readonly type: 'arc';
+    readonly start: Point3;
+    readonly mid: Point3;
+    readonly end: Point3;
+};
+
+export type SpatialCurveSegmentCircle = {
+    readonly type: 'circle';
+    readonly center: Point3;
+    readonly normal: Vector3;
+    readonly radius: number;
+    readonly xDirection?: Vector3;
+};
+
+export type SpatialCurveSegmentBezier = {
+    readonly type: 'bezier';
+    readonly controlPoints: readonly Point3[];
+};
+
+export type SpatialCurveSegmentBspline = {
+    readonly type: 'bspline';
+    readonly controlPoints: readonly Point3[];
+    readonly degree: number;
+    readonly knots: readonly number[];
+    readonly multiplicities: readonly number[];
+};
+
+export type SpatialCurveSegment =
+    | SpatialCurveSegmentLine
+    | SpatialCurveSegmentArc
+    | SpatialCurveSegmentCircle
+    | SpatialCurveSegmentBezier
+    | SpatialCurveSegmentBspline;
+
+export interface SpatialWire {
+    readonly segments: readonly SpatialCurveSegment[];
+}
+
 // ---------------------------------------------------------------------------
 // Feature parameters
 // ---------------------------------------------------------------------------
@@ -245,6 +290,80 @@ export interface RevolveCutProfileFeatureParams {
     readonly shape: ShapeHandle;
     readonly profile: Profile;
     readonly spec: RevolveProfileSpec;
+}
+
+export type SweepTrihedronMode =
+    | { readonly type: 'correctedFrenet' }
+    | { readonly type: 'frenet' }
+    | { readonly type: 'discrete' }
+    | { readonly type: 'fixedTrihedron'; readonly frame: PlaneFrame }
+    | { readonly type: 'fixedBinormal'; readonly binormal: Vector3 }
+    | {
+        readonly type: 'auxiliarySpine';
+        readonly spine: SpatialWire;
+        readonly curvilinearEquivalence?: boolean;
+        readonly contact?: 'none' | 'contact' | 'contactOnBorder';
+    };
+
+export interface SweepProfileSpec {
+    readonly schemaVersion: 1;
+    readonly allowUnknownFields?: boolean;
+    readonly unit?: { readonly length?: 'model'; readonly angle?: 'radians' | 'degrees' };
+    readonly plane?: PlaneFrame;
+    readonly spine: SpatialWire;
+    readonly trihedronMode?: SweepTrihedronMode;
+    readonly sectionWithContact?: boolean;
+    readonly sectionWithCorrection?: boolean;
+    readonly solid?: boolean;
+    readonly forceApproxC1?: boolean;
+    readonly transitionMode?: 'transformed' | 'rightCorner' | 'roundCorner';
+    readonly tolerance?: {
+        readonly tol3d?: number;
+        readonly boundTol?: number;
+        readonly angularTol?: number;
+    };
+    readonly maxDegree?: number;
+    readonly maxSegments?: number;
+    readonly metadata?: Record<string, unknown>;
+}
+
+export interface SweepProfileFeatureParams {
+    readonly shape: ShapeHandle;
+    readonly profile: Profile;
+    readonly spec: SweepProfileSpec;
+    readonly cut?: boolean;
+}
+
+export type LoftSection =
+    | { readonly type: 'profile'; readonly profile: Profile; readonly plane?: PlaneFrame }
+    | { readonly type: 'wire'; readonly wire: SpatialWire }
+    | { readonly type: 'point'; readonly point: Point3 };
+
+export interface LoftSpec {
+    readonly schemaVersion: 1;
+    readonly allowUnknownFields?: boolean;
+    readonly solid?: boolean;
+    readonly ruled?: boolean;
+    readonly pres3d?: number;
+    readonly checkCompatibility?: boolean;
+    readonly smoothing?: boolean;
+    readonly parametrization?: 'chordLength' | 'centripetal' | 'isoParametric';
+    readonly continuity?: 'C0' | 'G1' | 'C1' | 'G2' | 'C2' | 'C3' | 'CN';
+    readonly criteriumWeight?: {
+        readonly w1: number;
+        readonly w2: number;
+        readonly w3: number;
+    };
+    readonly maxDegree?: number;
+    readonly mutableInput?: boolean;
+    readonly metadata?: Record<string, unknown>;
+}
+
+export interface LoftFeatureParams {
+    readonly shape: ShapeHandle;
+    readonly sections: readonly LoftSection[];
+    readonly spec: LoftSpec;
+    readonly cut?: boolean;
 }
 
 export interface RotationTransform {
@@ -797,6 +916,38 @@ export interface KernelCapabilities {
         readonly surfaceTarget: boolean;
         readonly curvedSurfaceTarget: boolean;
         readonly slidingEdges: boolean;
+    };
+    readonly sweepProfile?: {
+        readonly schemaVersion: number;
+        readonly nativeExact: boolean;
+        readonly cutBoolean: boolean;
+        readonly plane: boolean;
+        readonly spine: boolean;
+        readonly trihedronModes: readonly string[];
+        readonly sectionWithContact: boolean;
+        readonly sectionWithCorrection: boolean;
+        readonly solid: boolean;
+        readonly forceApproxC1: boolean;
+        readonly transitionModes: readonly string[];
+        readonly tolerances: boolean;
+        readonly maxDegree: boolean;
+        readonly maxSegments: boolean;
+    };
+    readonly loft?: {
+        readonly schemaVersion: number;
+        readonly nativeExact: boolean;
+        readonly cutBoolean: boolean;
+        readonly sectionKinds: readonly string[];
+        readonly solid: boolean;
+        readonly ruled: boolean;
+        readonly pres3d: boolean;
+        readonly checkCompatibility: boolean;
+        readonly smoothing: boolean;
+        readonly parametrization: readonly string[];
+        readonly continuity: readonly string[];
+        readonly criteriumWeight: boolean;
+        readonly maxDegree: boolean;
+        readonly mutableInput: boolean;
     };
     readonly fillet?: {
         readonly schemaVersion: number;

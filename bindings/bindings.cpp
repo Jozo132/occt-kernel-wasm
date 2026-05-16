@@ -31,6 +31,8 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         .function("revolveProfile", &OcctKernel::revolveProfile)
         .function("revolveProfileWithSpec", &OcctKernel::revolveProfileWithSpec)
         .function("revolveCutProfileWithSpec", &OcctKernel::revolveCutProfileWithSpec)
+        .function("sweepProfileWithSpec", &OcctKernel::sweepProfileWithSpec)
+        .function("loftWithSpec", &OcctKernel::loftWithSpec)
 
         // Booleans
         .function("booleanUnion",      &OcctKernel::booleanUnion)
