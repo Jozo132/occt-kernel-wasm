@@ -115,7 +115,7 @@ export class MockNativeKernel {
             return shape.params.revisionInfo as Record<string, unknown>;
         }
 
-        const unresolved = ['union', 'subtract', 'intersect', 'fillet', 'chamfer', 'extrudeFeature', 'extrudeCutFeature'].includes(shape.kind);
+        const unresolved = ['union', 'subtract', 'intersect', 'fillet', 'chamfer', 'extrudeFeature', 'extrudeCutFeature', 'revolveFeature', 'revolveCutFeature'].includes(shape.kind);
         const retained = shape.kind === 'transform';
         return {
             revisionId: `rev_mock_${id}`,
@@ -473,6 +473,142 @@ export class MockNativeKernel {
         return options;
     }
 
+    private _parseRevolveSpec(specJson: string): Record<string, unknown> {
+        const spec = JSON.parse(specJson) as Record<string, unknown>;
+        if (spec.schemaVersion !== 1) {
+            throw new KernelError('INVALID_PARAMS', 'revolve spec.schemaVersion must be 1');
+        }
+
+        const allowUnknownFields = spec.allowUnknownFields === true;
+        if (!allowUnknownFields) {
+            const allowedKeys = new Set([
+                'schemaVersion',
+                'allowUnknownFields',
+                'unit',
+                'plane',
+                'axisOrigin',
+                'axisDirection',
+                'reverseDirection',
+                'slidingEdges',
+                'extent',
+                'metadata',
+            ]);
+            for (const key of Object.keys(spec)) {
+                if (!allowedKeys.has(key)) {
+                    throw new KernelError('INVALID_PARAMS', JSON.stringify({
+                        phase: 'validation',
+                        operation: 'revolveProfile',
+                        path: `revolve.${key}`,
+                        reason: 'Unknown field is not allowed for this schema version',
+                        unsupportedFeature: 'unknownField',
+                    }));
+                }
+            }
+        }
+
+        if (spec.unit !== undefined) {
+            const unit = spec.unit as Record<string, unknown>;
+            if (unit.length !== undefined && unit.length !== 'model') {
+                throw new KernelError('INVALID_PARAMS', 'revolve spec.unit.length must be model');
+            }
+            if (unit.angle !== undefined && unit.angle !== 'radians' && unit.angle !== 'degrees') {
+                throw new KernelError('INVALID_PARAMS', 'revolve spec.unit.angle must be radians or degrees');
+            }
+        }
+
+        if (spec.plane !== undefined) {
+            const plane = spec.plane as Record<string, unknown>;
+            if (!isPoint(plane.origin, 3) || !isPoint(plane.normal, 3) || !isPoint(plane.xDirection, 3)) {
+                throw new KernelError('INVALID_PARAMS', 'Plane must include origin, normal, and xDirection');
+            }
+            if (isZeroVector(plane.normal as number[]) || isZeroVector(plane.xDirection as number[])) {
+                throw new KernelError('INVALID_PARAMS', 'Plane vectors must not be zero');
+            }
+        }
+
+        if (spec.axisOrigin !== undefined && !isPoint(spec.axisOrigin, 3)) {
+            throw new KernelError('INVALID_PARAMS', 'revolve spec.axisOrigin must be a 3-element array');
+        }
+        if (spec.axisDirection !== undefined) {
+            if (!isPoint(spec.axisDirection, 3) || isZeroVector(spec.axisDirection as number[])) {
+                throw new KernelError('INVALID_PARAMS', 'revolve spec.axisDirection must be a non-zero 3-element array');
+            }
+        }
+        if (spec.reverseDirection !== undefined && typeof spec.reverseDirection !== 'boolean') {
+            throw new KernelError('INVALID_PARAMS', 'revolve spec.reverseDirection must be a boolean');
+        }
+
+        if (spec.slidingEdges !== undefined) {
+            if (!Array.isArray(spec.slidingEdges)) {
+                throw new KernelError('INVALID_PARAMS', 'revolve spec.slidingEdges must be an array');
+            }
+            for (const [index, entry] of (spec.slidingEdges as Record<string, unknown>[]).entries()) {
+                if (!isPositiveInteger(entry.profileEdgeIndex)) {
+                    throw new KernelError('INVALID_PARAMS', `revolve spec.slidingEdges[${index}].profileEdgeIndex must be a positive integer`);
+                }
+                this._validateRef((entry.face ?? {}) as Record<string, unknown>, `revolve spec.slidingEdges[${index}].face`);
+            }
+        }
+
+        const validateSurface = (label: string, surface: Record<string, unknown> | undefined): void => {
+            if (!surface || typeof surface !== 'object') {
+                throw new KernelError('INVALID_PARAMS', `${label} must be an object`);
+            }
+            if (surface.shapeId !== undefined) {
+                if (!isPositiveInteger(surface.shapeId)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.shapeId must be a positive integer`);
+                }
+                this._require(surface.shapeId as number);
+            }
+            this._validateRef((surface.face ?? {}) as Record<string, unknown>, `${label}.face`);
+        };
+
+        const validateAngle = (label: string, value: Record<string, unknown>): void => {
+            const hasRadians = typeof value.angleRadians === 'number';
+            const hasDegrees = typeof value.angleDegrees === 'number';
+            if (hasRadians && hasDegrees) {
+                throw new KernelError('INVALID_PARAMS', `${label} must not specify both angleRadians and angleDegrees`);
+            }
+            if (!hasRadians && !hasDegrees) {
+                throw new KernelError('INVALID_PARAMS', `${label} must specify angleRadians or angleDegrees`);
+            }
+            if (hasRadians && (!(Number.isFinite(value.angleRadians)) || value.angleRadians === 0 || Math.abs(value.angleRadians as number) > Math.PI * 2)) {
+                throw new KernelError('INVALID_PARAMS', `${label}.angleRadians must be in [-2pi, 2pi] excluding 0`);
+            }
+            if (hasDegrees && (!(Number.isFinite(value.angleDegrees)) || value.angleDegrees === 0 || Math.abs(value.angleDegrees as number) > 360)) {
+                throw new KernelError('INVALID_PARAMS', `${label}.angleDegrees must be in [-360, 360] excluding 0`);
+            }
+        };
+
+        const extent = spec.extent as Record<string, unknown> | undefined;
+        if (!extent || typeof extent.type !== 'string') {
+            throw new KernelError('INVALID_PARAMS', 'revolve spec.extent must be provided');
+        }
+
+        switch (extent.type) {
+            case 'angle':
+                validateAngle('revolve spec.extent', extent);
+                break;
+            case 'upToSurface':
+                validateSurface('revolve spec.extent.surface', extent.surface as Record<string, unknown> | undefined);
+                break;
+            case 'fromSurfaceToSurface':
+                validateSurface('revolve spec.extent.fromSurface', extent.fromSurface as Record<string, unknown> | undefined);
+                validateSurface('revolve spec.extent.untilSurface', extent.untilSurface as Record<string, unknown> | undefined);
+                break;
+            case 'throughAll':
+                break;
+            case 'upToSurfaceAtAngle':
+                validateSurface('revolve spec.extent.surface', extent.surface as Record<string, unknown> | undefined);
+                validateAngle('revolve spec.extent', extent);
+                break;
+            default:
+                throw new KernelError('INVALID_PARAMS', `revolve spec.extent.type '${extent.type}' is not supported`);
+        }
+
+        return spec;
+    }
+
     private _parseShapeTransform(transformJson: string): MockShapeTransform {
         const transform = JSON.parse(transformJson) as MockShapeTransform;
         if (transform.translation !== undefined) {
@@ -523,6 +659,20 @@ export class MockNativeKernel {
         const profile = this._parseProfile(profileJson);
         const options = this._parseRevolveOptions(optionsJson);
         return this._store('revolve', { profile, options });
+    }
+
+    revolveProfileWithSpec(id: number, profileJson: string, specJson: string): number {
+        this._require(id);
+        const profile = this._parseProfile(profileJson);
+        const spec = this._parseRevolveSpec(specJson);
+        return this._store('revolveFeature', { id, profile, spec });
+    }
+
+    revolveCutProfileWithSpec(id: number, profileJson: string, specJson: string): number {
+        this._require(id);
+        const profile = this._parseProfile(profileJson);
+        const spec = this._parseRevolveSpec(specJson);
+        return this._store('revolveCutFeature', { id, profile, spec });
     }
 
     // -- Booleans --
@@ -765,6 +915,36 @@ export class MockNativeKernel {
                         curvedSurfaceTarget: true,
                     },
                 },
+                revolveProfile: {
+                    schemaVersion: 1,
+                    nativeExact: true,
+                    requiresMeshFallback: false,
+                    supports: {
+                        plane: true,
+                        axis: true,
+                        reverseDirection: true,
+                        signedAngle: true,
+                        endConditions: ['angle', 'upToSurface', 'fromSurfaceToSurface', 'throughAll', 'upToSurfaceAtAngle'],
+                        surfaceTarget: true,
+                        curvedSurfaceTarget: true,
+                        slidingEdges: true,
+                    },
+                },
+                revolveCutProfile: {
+                    schemaVersion: 1,
+                    nativeExact: true,
+                    requiresMeshFallback: false,
+                    supports: {
+                        plane: true,
+                        axis: true,
+                        reverseDirection: true,
+                        signedAngle: true,
+                        endConditions: ['angle', 'upToSurface', 'fromSurfaceToSurface', 'throughAll', 'upToSurfaceAtAngle'],
+                        surfaceTarget: true,
+                        curvedSurfaceTarget: true,
+                        slidingEdges: true,
+                    },
+                },
                 filletEdges: { schemaVersion: 1, nativeExact: true },
                 chamferEdges: { schemaVersion: 1, nativeExact: true },
                 evaluateEdge: { schemaVersion: 1, nativeExact: true },
@@ -817,6 +997,30 @@ export class MockNativeKernel {
                 endConditions: ['blind', 'upToNext', 'throughAll', 'upToSurface', 'offsetFromSurface'],
                 surfaceTarget: true,
                 curvedSurfaceTarget: true,
+            },
+            revolveProfile: {
+                schemaVersion: 1,
+                nativeExact: true,
+                plane: true,
+                axis: true,
+                reverseDirection: true,
+                signedAngle: true,
+                endConditions: ['angle', 'upToSurface', 'fromSurfaceToSurface', 'throughAll', 'upToSurfaceAtAngle'],
+                surfaceTarget: true,
+                curvedSurfaceTarget: true,
+                slidingEdges: true,
+            },
+            revolveCutProfile: {
+                schemaVersion: 1,
+                nativeExact: true,
+                plane: true,
+                axis: true,
+                reverseDirection: true,
+                signedAngle: true,
+                endConditions: ['angle', 'upToSurface', 'fromSurfaceToSurface', 'throughAll', 'upToSurfaceAtAngle'],
+                surfaceTarget: true,
+                curvedSurfaceTarget: true,
+                slidingEdges: true,
             },
             fillet: {
                 schemaVersion: 1,

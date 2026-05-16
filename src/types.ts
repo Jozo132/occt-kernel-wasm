@@ -195,6 +195,58 @@ export interface RevolveParams {
     readonly axisDirection?: Vector3;
 }
 
+export interface RevolveSurfaceTarget {
+    /** Optional external shape containing the limiting face. Defaults to `shape`. */
+    readonly shape?: ShapeHandle;
+    readonly face: FaceRef;
+}
+
+export interface RevolveSlidingEdgeSpec {
+    /** 1-based edge index in the placed sketch profile topology. */
+    readonly profileEdgeIndex: number;
+    /** Base-shape face that the revolved sketch edge should slide on. */
+    readonly face: FaceRef;
+}
+
+export type RevolveProfileExtent =
+    | { readonly type: 'angle'; readonly angleRadians?: number; readonly angleDegrees?: number }
+    | { readonly type: 'upToSurface'; readonly surface: RevolveSurfaceTarget }
+    | { readonly type: 'fromSurfaceToSurface'; readonly fromSurface: RevolveSurfaceTarget; readonly untilSurface: RevolveSurfaceTarget }
+    | { readonly type: 'throughAll' }
+    | { readonly type: 'upToSurfaceAtAngle'; readonly surface: RevolveSurfaceTarget; readonly angleRadians?: number; readonly angleDegrees?: number };
+
+export interface RevolveProfileSpec {
+    readonly schemaVersion: 1;
+    readonly allowUnknownFields?: boolean;
+    readonly unit?: { readonly length?: 'model'; readonly angle?: 'radians' | 'degrees' };
+    /** Optional sketch-plane placement for the local 2-D profile. */
+    readonly plane?: PlaneFrame;
+    /** Optional world-space point on the revolve axis. Defaults to the origin. */
+    readonly axisOrigin?: Point3;
+    /** Optional world-space axis direction. Defaults to +Y. */
+    readonly axisDirection?: Vector3;
+    /** Flip the resolved revolve axis direction before applying the feature. */
+    readonly reverseDirection?: boolean;
+    /** Optional profile-edge sliding constraints for local gluing behavior. */
+    readonly slidingEdges?: readonly RevolveSlidingEdgeSpec[];
+    readonly extent: RevolveProfileExtent;
+    readonly metadata?: Record<string, unknown>;
+}
+
+export interface RevolveProfileFeatureParams {
+    readonly shape: ShapeHandle;
+    readonly profile: Profile;
+    readonly spec: RevolveProfileSpec;
+    /** When true, dispatches to the subtractive revolve feature path. */
+    readonly cut?: boolean;
+}
+
+export interface RevolveCutProfileFeatureParams {
+    readonly shape: ShapeHandle;
+    readonly profile: Profile;
+    readonly spec: RevolveProfileSpec;
+}
+
 export interface RotationTransform {
     readonly axisOrigin: Point3;
     readonly axisDirection: Vector3;
@@ -721,6 +773,30 @@ export interface KernelCapabilities {
         readonly endConditions: readonly string[];
         readonly surfaceTarget: boolean;
         readonly curvedSurfaceTarget: boolean;
+    };
+    readonly revolveProfile?: {
+        readonly schemaVersion: number;
+        readonly nativeExact: boolean;
+        readonly plane: boolean;
+        readonly axis: boolean;
+        readonly reverseDirection: boolean;
+        readonly signedAngle: boolean;
+        readonly endConditions: readonly string[];
+        readonly surfaceTarget: boolean;
+        readonly curvedSurfaceTarget: boolean;
+        readonly slidingEdges: boolean;
+    };
+    readonly revolveCutProfile?: {
+        readonly schemaVersion: number;
+        readonly nativeExact: boolean;
+        readonly plane: boolean;
+        readonly axis: boolean;
+        readonly reverseDirection: boolean;
+        readonly signedAngle: boolean;
+        readonly endConditions: readonly string[];
+        readonly surfaceTarget: boolean;
+        readonly curvedSurfaceTarget: boolean;
+        readonly slidingEdges: boolean;
     };
     readonly fillet?: {
         readonly schemaVersion: number;

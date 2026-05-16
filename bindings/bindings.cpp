@@ -29,6 +29,8 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         .function("extrudeProfileWithSpec", &OcctKernel::extrudeProfileWithSpec)
         .function("extrudeCutProfileWithSpec", &OcctKernel::extrudeCutProfileWithSpec)
         .function("revolveProfile", &OcctKernel::revolveProfile)
+        .function("revolveProfileWithSpec", &OcctKernel::revolveProfileWithSpec)
+        .function("revolveCutProfileWithSpec", &OcctKernel::revolveCutProfileWithSpec)
 
         // Booleans
         .function("booleanUnion",      &OcctKernel::booleanUnion)

@@ -36,6 +36,7 @@
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepFeat_MakeDPrism.hxx>
+#include <BRepFeat_MakeRevol.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax3.hxx>
@@ -187,6 +188,34 @@ struct StructuredExtrudeSpec {
     double offset = 0.0;
     bool hasSurfaceTarget = false;
     StructuredExtrudeSurfaceTarget surfaceTarget;
+};
+
+enum class StructuredRevolveExtentMode {
+    Angle,
+    UpToSurface,
+    FromSurfaceToSurface,
+    ThroughAll,
+    UpToSurfaceAtAngle,
+};
+
+struct StructuredRevolveSlidingEdge {
+    int profileEdgeIndex = 0;
+    mini_json::Value faceRef = mini_json::Value::makeObject();
+};
+
+struct StructuredRevolveSpec {
+    PlaneFrame plane;
+    gp_Pnt axisOrigin = gp_Pnt(0.0, 0.0, 0.0);
+    gp_Dir axisDirection = gp_Dir(0.0, 1.0, 0.0);
+    StructuredRevolveExtentMode extentMode = StructuredRevolveExtentMode::Angle;
+    double angleRadians = 0.0;
+    bool hasSurfaceTarget = false;
+    StructuredExtrudeSurfaceTarget surfaceTarget;
+    bool hasFromSurface = false;
+    StructuredExtrudeSurfaceTarget fromSurfaceTarget;
+    bool hasUntilSurface = false;
+    StructuredExtrudeSurfaceTarget untilSurfaceTarget;
+    std::vector<StructuredRevolveSlidingEdge> slidingEdges;
 };
 
 struct RevolveOptions {
@@ -973,6 +1002,40 @@ double optionalSignedAngleRadians(const mini_json::Value& object,
     return 0.0;
 }
 
+double requireSignedExtentAngleRadians(const mini_json::Value& object,
+                                       const std::string& operation,
+                                       const std::string& path) {
+    const bool hasRadians = hasMember(object, "angleRadians");
+    const bool hasDegrees = hasMember(object, "angleDegrees");
+    if (hasRadians && hasDegrees) {
+        throwStructuredValidation(operation,
+                                  path,
+                                  "Specify only one of angleRadians or angleDegrees");
+    }
+    if (!hasRadians && !hasDegrees) {
+        throwStructuredValidation(operation,
+                                  path,
+                                  "Specify angleRadians or angleDegrees");
+    }
+    if (hasRadians) {
+        const double angle = optionalNumberMember(object, "angleRadians", 0.0);
+        if (!std::isfinite(angle) || angle == 0.0 || std::abs(angle) > (2.0 * M_PI)) {
+            throwStructuredValidation(operation,
+                                      path + ".angleRadians",
+                                      "angleRadians must be finite, non-zero, and in [-2pi, 2pi]");
+        }
+        return angle;
+    }
+
+    const double angle = optionalNumberMember(object, "angleDegrees", 0.0);
+    if (!std::isfinite(angle) || angle == 0.0 || std::abs(angle) > 360.0) {
+        throwStructuredValidation(operation,
+                                  path + ".angleDegrees",
+                                  "angleDegrees must be finite, non-zero, and in [-360, 360]");
+    }
+    return angle * M_PI / 180.0;
+}
+
 StructuredExtrudeSurfaceTarget parseStructuredExtrudeSurfaceTarget(const mini_json::Value& value,
                                                                    bool allowUnknownFields,
                                                                    const std::string& operation,
@@ -1084,6 +1147,125 @@ StructuredExtrudeSpec parseStructuredExtrudeSpec(const std::string& specJson,
                                                                  operation,
                                                                  pathRoot + ".extent.surface");
         spec.offset = requirePositiveMember(extent, "offset", operation, pathRoot + ".extent.offset");
+    } else {
+        throwStructuredValidation(operation,
+                                  pathRoot + ".extent.type",
+                                  "Unsupported extent type");
+    }
+
+    return spec;
+}
+
+StructuredRevolveSpec parseStructuredRevolveSpec(const std::string& specJson,
+                                                 const std::string& operation,
+                                                 const std::string& pathRoot) {
+    const mini_json::Value root = mini_json::requireObject(mini_json::parse(specJson), pathRoot + " spec");
+    requireSchemaVersion(root, operation);
+    const bool allowUnknownFields = optionalBoolMember(root, "allowUnknownFields", false);
+    rejectUnknownFields(root,
+                        { "schemaVersion", "allowUnknownFields", "unit", "plane", "axisOrigin", "axisDirection", "reverseDirection", "slidingEdges", "extent", "metadata" },
+                        operation,
+                        pathRoot,
+                        allowUnknownFields);
+
+    if (const mini_json::Value* unitValue = root.get("unit")) {
+        const mini_json::Value& unit = mini_json::requireObject(*unitValue, pathRoot + ".unit");
+        rejectUnknownFields(unit, { "length", "angle" }, operation, pathRoot + ".unit", allowUnknownFields);
+        if (hasMember(unit, "length")) {
+            const std::string lengthUnit = optionalStringMember(unit, "length");
+            if (lengthUnit != "model") {
+                throwStructuredValidation(operation,
+                                          pathRoot + ".unit.length",
+                                          "Only model length units are supported");
+            }
+        }
+        if (hasMember(unit, "angle")) {
+            const std::string angleUnit = optionalStringMember(unit, "angle");
+            if (angleUnit != "radians" && angleUnit != "degrees") {
+                throwStructuredValidation(operation,
+                                          pathRoot + ".unit.angle",
+                                          "Angle unit must be radians or degrees");
+            }
+        }
+    }
+
+    StructuredRevolveSpec spec;
+    if (const mini_json::Value* planeValue = root.get("plane")) {
+        spec.plane = parsePlaneFrame(mini_json::requireObject(*planeValue, pathRoot + ".plane"));
+    }
+    if (const mini_json::Value* axisOriginValue = root.get("axisOrigin")) {
+        spec.axisOrigin = parsePoint3(*axisOriginValue, pathRoot + ".axisOrigin");
+    }
+    if (const mini_json::Value* axisDirectionValue = root.get("axisDirection")) {
+        spec.axisDirection = parseDirection3(*axisDirectionValue, pathRoot + ".axisDirection");
+    }
+    if (optionalBoolMember(root, "reverseDirection", false)) {
+        spec.axisDirection.Reverse();
+    }
+
+    if (const mini_json::Value* slidingEdgesValue = root.get("slidingEdges")) {
+        const mini_json::Value& slidingEdges = mini_json::requireArray(*slidingEdgesValue, pathRoot + ".slidingEdges");
+        spec.slidingEdges.reserve(slidingEdges.array.size());
+        for (std::size_t index = 0; index < slidingEdges.array.size(); ++index) {
+            const std::string edgePath = pathRoot + ".slidingEdges[" + std::to_string(index) + "]";
+            const mini_json::Value& entry = mini_json::requireObject(slidingEdges.array[index], edgePath);
+            rejectUnknownFields(entry, { "profileEdgeIndex", "face" }, operation, edgePath, allowUnknownFields);
+
+            StructuredRevolveSlidingEdge slidingEdge;
+            slidingEdge.profileEdgeIndex = requirePositiveIntMember(entry,
+                                                                    "profileEdgeIndex",
+                                                                    operation,
+                                                                    edgePath + ".profileEdgeIndex");
+            slidingEdge.faceRef = mini_json::requireObject(mini_json::requireMember(entry, "face", edgePath), edgePath + ".face");
+            spec.slidingEdges.push_back(slidingEdge);
+        }
+    }
+
+    const mini_json::Value& extent = mini_json::requireObject(mini_json::requireMember(root, "extent", pathRoot), pathRoot + ".extent");
+    const std::string extentType = optionalStringMember(extent, "type");
+    if (extentType.empty()) {
+        throwStructuredValidation(operation,
+                                  pathRoot + ".extent.type",
+                                  "Extent type is required");
+    }
+
+    if (extentType == "angle") {
+        rejectUnknownFields(extent, { "type", "angleRadians", "angleDegrees" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredRevolveExtentMode::Angle;
+        spec.angleRadians = requireSignedExtentAngleRadians(extent, operation, pathRoot + ".extent");
+    } else if (extentType == "upToSurface") {
+        rejectUnknownFields(extent, { "type", "surface" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredRevolveExtentMode::UpToSurface;
+        spec.hasSurfaceTarget = true;
+        spec.surfaceTarget = parseStructuredExtrudeSurfaceTarget(mini_json::requireMember(extent, "surface", pathRoot + ".extent"),
+                                                                 allowUnknownFields,
+                                                                 operation,
+                                                                 pathRoot + ".extent.surface");
+    } else if (extentType == "fromSurfaceToSurface") {
+        rejectUnknownFields(extent, { "type", "fromSurface", "untilSurface" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredRevolveExtentMode::FromSurfaceToSurface;
+        spec.hasFromSurface = true;
+        spec.fromSurfaceTarget = parseStructuredExtrudeSurfaceTarget(mini_json::requireMember(extent, "fromSurface", pathRoot + ".extent"),
+                                                                     allowUnknownFields,
+                                                                     operation,
+                                                                     pathRoot + ".extent.fromSurface");
+        spec.hasUntilSurface = true;
+        spec.untilSurfaceTarget = parseStructuredExtrudeSurfaceTarget(mini_json::requireMember(extent, "untilSurface", pathRoot + ".extent"),
+                                                                      allowUnknownFields,
+                                                                      operation,
+                                                                      pathRoot + ".extent.untilSurface");
+    } else if (extentType == "throughAll") {
+        rejectUnknownFields(extent, { "type" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredRevolveExtentMode::ThroughAll;
+    } else if (extentType == "upToSurfaceAtAngle") {
+        rejectUnknownFields(extent, { "type", "surface", "angleRadians", "angleDegrees" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredRevolveExtentMode::UpToSurfaceAtAngle;
+        spec.hasSurfaceTarget = true;
+        spec.surfaceTarget = parseStructuredExtrudeSurfaceTarget(mini_json::requireMember(extent, "surface", pathRoot + ".extent"),
+                                                                 allowUnknownFields,
+                                                                 operation,
+                                                                 pathRoot + ".extent.surface");
+        spec.angleRadians = requireSignedExtentAngleRadians(extent, operation, pathRoot + ".extent");
     } else {
         throwStructuredValidation(operation,
                                   pathRoot + ".extent.type",
@@ -1287,6 +1469,48 @@ TopoDS_Shape performStructuredExtrudeExtent(TFeature& feature,
 
     if (!feature.IsDone() || feature.Shape().IsNull()) {
         throwStructuredOperationError(operation, "Structured extrusion feature failed");
+    }
+    return feature.Shape();
+}
+
+TopoDS_Shape performStructuredRevolveExtent(BRepFeat_MakeRevol& feature,
+                                            const StructuredRevolveSpec& spec,
+                                            const TopoDS_Shape* surfaceLimitShape,
+                                            const TopoDS_Shape* fromSurfaceShape,
+                                            const TopoDS_Shape* untilSurfaceShape,
+                                            const std::string& operation) {
+    switch (spec.extentMode) {
+    case StructuredRevolveExtentMode::Angle:
+        feature.Perform(spec.angleRadians);
+        break;
+    case StructuredRevolveExtentMode::UpToSurface:
+        if (surfaceLimitShape == nullptr) {
+            throwStructuredValidation(operation, "extent.surface", "Surface limit is required");
+        }
+        feature.Perform(*surfaceLimitShape);
+        break;
+    case StructuredRevolveExtentMode::FromSurfaceToSurface:
+        if (fromSurfaceShape == nullptr) {
+            throwStructuredValidation(operation, "extent.fromSurface", "From surface is required");
+        }
+        if (untilSurfaceShape == nullptr) {
+            throwStructuredValidation(operation, "extent.untilSurface", "Until surface is required");
+        }
+        feature.Perform(*fromSurfaceShape, *untilSurfaceShape);
+        break;
+    case StructuredRevolveExtentMode::ThroughAll:
+        feature.PerformThruAll();
+        break;
+    case StructuredRevolveExtentMode::UpToSurfaceAtAngle:
+        if (surfaceLimitShape == nullptr) {
+            throwStructuredValidation(operation, "extent.surface", "Surface limit is required");
+        }
+        feature.PerformUntilAngle(*surfaceLimitShape, spec.angleRadians);
+        break;
+    }
+
+    if (!feature.IsDone() || feature.Shape().IsNull()) {
+        throwStructuredOperationError(operation, "Structured revolve feature failed");
     }
     return feature.Shape();
 }
@@ -2211,6 +2435,124 @@ uint32_t OcctKernel::revolveProfile(const std::string& profileJson, const std::s
                                       "generated",
                                       "generated",
                                       {});
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return 0;
+}
+
+uint32_t OcctKernel::performStructuredRevolveFeature(uint32_t id,
+                                                     const std::string& profileJson,
+                                                     const std::string& specJson,
+                                                     const std::string& operationType,
+                                                     int fuseMode) {
+    const std::string pathRoot = operationType == "revolveCutProfile" ? "revolveCut" : "revolve";
+    auto sourceIt = _impl->records.find(id);
+    if (sourceIt == _impl->records.end()) {
+        throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+    }
+
+    const StructuredRevolveSpec spec = parseStructuredRevolveSpec(specJson, operationType, pathRoot);
+    const TopoDS_Shape& baseShape = sourceIt->second.shape;
+    const RevisionMetadata* baseRevision = &sourceIt->second.revision;
+    TopoDS_Face profileFace = placeProfileFace(buildFaceFromProfile(profileJson), spec.plane);
+
+    auto resolveSurfaceTarget = [&](const StructuredExtrudeSurfaceTarget& target,
+                                    const std::string& facePath) -> TopoDS_Shape {
+        const TopoDS_Shape* targetShape = &baseShape;
+        const RevisionMetadata* targetRevision = baseRevision;
+        if (target.hasShapeId) {
+            auto targetIt = _impl->records.find(target.shapeId);
+            if (targetIt == _impl->records.end()) {
+                throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(target.shapeId));
+            }
+            targetShape = &targetIt->second.shape;
+            targetRevision = &targetIt->second.revision;
+        }
+        const ResolvedFaceRef targetFace = resolveFaceRef(*targetShape,
+                                                          targetRevision,
+                                                          target.faceRef,
+                                                          operationType,
+                                                          facePath);
+        return targetFace.face;
+    };
+
+    TopoDS_Shape surfaceLimitShape;
+    const TopoDS_Shape* surfaceLimitShapePtr = nullptr;
+    if (spec.hasSurfaceTarget) {
+        surfaceLimitShape = resolveSurfaceTarget(spec.surfaceTarget, pathRoot + ".extent.surface.face");
+        surfaceLimitShapePtr = &surfaceLimitShape;
+    }
+
+    TopoDS_Shape fromSurfaceShape;
+    const TopoDS_Shape* fromSurfaceShapePtr = nullptr;
+    if (spec.hasFromSurface) {
+        fromSurfaceShape = resolveSurfaceTarget(spec.fromSurfaceTarget, pathRoot + ".extent.fromSurface.face");
+        fromSurfaceShapePtr = &fromSurfaceShape;
+    }
+
+    TopoDS_Shape untilSurfaceShape;
+    const TopoDS_Shape* untilSurfaceShapePtr = nullptr;
+    if (spec.hasUntilSurface) {
+        untilSurfaceShape = resolveSurfaceTarget(spec.untilSurfaceTarget, pathRoot + ".extent.untilSurface.face");
+        untilSurfaceShapePtr = &untilSurfaceShape;
+    }
+
+    gp_Ax1 axis(spec.axisOrigin, spec.axisDirection);
+    BRepFeat_MakeRevol feature;
+    feature.Init(baseShape, profileFace, profileFace, axis, fuseMode, true);
+
+    if (!spec.slidingEdges.empty()) {
+        ShapeMap profileEdges;
+        TopExp::MapShapes(profileFace, TopAbs_EDGE, profileEdges);
+        for (std::size_t index = 0; index < spec.slidingEdges.size(); ++index) {
+            const StructuredRevolveSlidingEdge& slidingEdge = spec.slidingEdges[index];
+            if (slidingEdge.profileEdgeIndex < 1 || slidingEdge.profileEdgeIndex > profileEdges.Extent()) {
+                throwStructuredValidation(operationType,
+                                          pathRoot + ".slidingEdges[" + std::to_string(index) + "].profileEdgeIndex",
+                                          "Profile edge index is outside the current sketch topology");
+            }
+            const ResolvedFaceRef onFace = resolveFaceRef(baseShape,
+                                                         baseRevision,
+                                                         slidingEdge.faceRef,
+                                                         operationType,
+                                                         pathRoot + ".slidingEdges[" + std::to_string(index) + "].face");
+            feature.Add(TopoDS::Edge(profileEdges(slidingEdge.profileEdgeIndex)), onFace.face);
+        }
+    }
+
+    const TopoDS_Shape resultShape = performStructuredRevolveExtent(feature,
+                                                                    spec,
+                                                                    surfaceLimitShapePtr,
+                                                                    fromSurfaceShapePtr,
+                                                                    untilSurfaceShapePtr,
+                                                                    operationType);
+
+    return storeShapeWithMetadata(resultShape,
+                                  operationType,
+                                  "source=" + baseRevision->revisionId + ";" + profileJson + "|" + specJson,
+                                  { baseRevision->revisionId },
+                                  "unresolved",
+                                  "unresolved",
+                                  { "Structured revolve feature lineage is not yet proven; generated/modified/deleted identity is reported as unresolved" });
+}
+
+uint32_t OcctKernel::revolveProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson) {
+    try {
+        return performStructuredRevolveFeature(id, profileJson, specJson, "revolveProfile", 1);
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return 0;
+}
+
+uint32_t OcctKernel::revolveCutProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson) {
+    try {
+        return performStructuredRevolveFeature(id, profileJson, specJson, "revolveCutProfile", 0);
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
@@ -3336,6 +3678,8 @@ std::string OcctKernel::getOperationSchema() const {
         "\"operations\":{"
         "\"extrudeProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"direction\":true,\"draft\":true,\"plane\":true,\"reverseDirection\":true,\"endConditions\":[\"blind\",\"upToNext\",\"throughAll\",\"upToSurface\",\"offsetFromSurface\"],\"surfaceTarget\":true,\"curvedSurfaceTarget\":true}},"
         "\"extrudeCutProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"direction\":true,\"draft\":true,\"plane\":true,\"reverseDirection\":true,\"endConditions\":[\"blind\",\"upToNext\",\"throughAll\",\"upToSurface\",\"offsetFromSurface\"],\"surfaceTarget\":true,\"curvedSurfaceTarget\":true}},"
+        "\"revolveProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"plane\":true,\"axis\":true,\"reverseDirection\":true,\"signedAngle\":true,\"endConditions\":[\"angle\",\"upToSurface\",\"fromSurfaceToSurface\",\"throughAll\",\"upToSurfaceAtAngle\"],\"surfaceTarget\":true,\"curvedSurfaceTarget\":true,\"slidingEdges\":true}},"
+        "\"revolveCutProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"plane\":true,\"axis\":true,\"reverseDirection\":true,\"signedAngle\":true,\"endConditions\":[\"angle\",\"upToSurface\",\"fromSurfaceToSurface\",\"throughAll\",\"upToSurfaceAtAngle\"],\"surfaceTarget\":true,\"curvedSurfaceTarget\":true,\"slidingEdges\":true}},"
         "\"filletEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"constantRadius\":true,\"startEndRadius\":true,\"stationRadii\":true,\"lawRadius\":[\"constant\",\"linear\"],\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"blendShape\":[\"rational\",\"quasiAngular\",\"polynomial\"],\"continuity\":[\"C0\",\"C1\",\"C2\"],\"overflowModes\":[\"fail\"]}},"
         "\"chamferEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"symmetric\":true,\"twoDistance\":true,\"distanceAngle\":true,\"referenceFace\":true,\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"overflowModes\":[\"fail\"]}},"
         "\"evaluateEdge\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
@@ -3388,6 +3732,30 @@ std::string OcctKernel::getCapabilities() const {
         "\"endConditions\":[\"blind\",\"upToNext\",\"throughAll\",\"upToSurface\",\"offsetFromSurface\"],"
         "\"surfaceTarget\":true,"
         "\"curvedSurfaceTarget\":true"
+        "},"
+        "\"revolveProfile\":{"
+        "\"schemaVersion\":1,"
+        "\"nativeExact\":true,"
+        "\"plane\":true,"
+        "\"axis\":true,"
+        "\"reverseDirection\":true,"
+        "\"signedAngle\":true,"
+        "\"endConditions\":[\"angle\",\"upToSurface\",\"fromSurfaceToSurface\",\"throughAll\",\"upToSurfaceAtAngle\"],"
+        "\"surfaceTarget\":true,"
+        "\"curvedSurfaceTarget\":true,"
+        "\"slidingEdges\":true"
+        "},"
+        "\"revolveCutProfile\":{"
+        "\"schemaVersion\":1,"
+        "\"nativeExact\":true,"
+        "\"plane\":true,"
+        "\"axis\":true,"
+        "\"reverseDirection\":true,"
+        "\"signedAngle\":true,"
+        "\"endConditions\":[\"angle\",\"upToSurface\",\"fromSurfaceToSurface\",\"throughAll\",\"upToSurfaceAtAngle\"],"
+        "\"surfaceTarget\":true,"
+        "\"curvedSurfaceTarget\":true,"
+        "\"slidingEdges\":true"
         "},"
         "\"fillet\":{"
         "\"schemaVersion\":1,"

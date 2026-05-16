@@ -571,6 +571,90 @@ describe('structured profile extrusion operations', () => {
     });
 });
 
+describe('structured profile revolve operations', () => {
+    const profile = {
+        segments: [
+            { type: 'line' as const, start: [2, 0] as [number, number], end: [5, 0] as [number, number] },
+            { type: 'line' as const, start: [5, 0] as [number, number], end: [5, 10] as [number, number] },
+            { type: 'line' as const, start: [5, 10] as [number, number], end: [2, 10] as [number, number] },
+            { type: 'line' as const, start: [2, 10] as [number, number], end: [2, 0] as [number, number] },
+        ],
+    };
+
+    it('applies an additive revolve feature with signed angle and sliding edges', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const result = k.revolveProfileWithSpec({
+            shape: box,
+            profile,
+            spec: {
+                schemaVersion: 1,
+                plane: {
+                    origin: [0, 0, 0],
+                    normal: [0, 0, 1],
+                    xDirection: [1, 0, 0],
+                },
+                axisOrigin: [0, 0, 0],
+                axisDirection: [0, 1, 0],
+                slidingEdges: [{ profileEdgeIndex: 1, face: { topoId: 1 } }],
+                extent: {
+                    type: 'angle',
+                    angleDegrees: -180,
+                },
+            },
+        });
+
+        expect(result.id).toBeGreaterThan(0);
+        expect(result.id).not.toBe(box.id);
+    });
+
+    it('cuts a base shape up to a referenced surface at a limiting angle', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const target = k.createBox({ dx: 20, dy: 20, dz: 20 });
+        const result = k.revolveProfileWithSpec({
+            shape: box,
+            cut: true,
+            profile,
+            spec: {
+                schemaVersion: 1,
+                axisOrigin: [0, 0, 0],
+                axisDirection: [0, 0, 1],
+                extent: {
+                    type: 'upToSurfaceAtAngle',
+                    angleDegrees: 90,
+                    surface: {
+                        shape: target,
+                        face: { topoId: 1 },
+                    },
+                },
+            },
+        });
+
+        expect(result.id).toBeGreaterThan(0);
+        expect(result.id).not.toBe(box.id);
+        expect(k.getRevisionInfo(result).operationType).toBe('revolveCutFeature');
+    });
+
+    it('throws when both angle unit fields are provided in a structured revolve extent', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        expect(() => k.revolveProfileWithSpec({
+            shape: box,
+            profile,
+            spec: {
+                schemaVersion: 1,
+                extent: {
+                    type: 'angle',
+                    angleRadians: Math.PI / 2,
+                    angleDegrees: 90,
+                },
+            },
+        })).toThrow(KernelError);
+    });
+});
+
 describe('exact subshape evaluation APIs', () => {
     it('evaluates, samples, and describes an edge without tessellation', () => {
         const k = makeKernel();
@@ -659,6 +743,8 @@ describe('getCapabilities', () => {
         expect(capabilities.extrudeProfile?.draft).toBe(true);
         expect(capabilities.extrudeProfile?.endConditions).toContain('upToSurface');
         expect(capabilities.extrudeCutProfile?.curvedSurfaceTarget).toBe(true);
+        expect(capabilities.revolveProfile?.slidingEdges).toBe(true);
+        expect(capabilities.revolveCutProfile?.endConditions).toContain('upToSurfaceAtAngle');
         expect(capabilities.fillet?.stationRadii).toBe(true);
         expect(capabilities.fillet?.partialEdges).toBe(false);
         expect(capabilities.chamfer?.distanceAngle).toBe(true);
@@ -672,6 +758,8 @@ describe('getCapabilities', () => {
         expect(schema.schemaVersion).toBe(1);
         expect(schema.operations.extrudeProfile).toBeDefined();
         expect(schema.operations.extrudeCutProfile).toBeDefined();
+        expect(schema.operations.revolveProfile).toBeDefined();
+        expect(schema.operations.revolveCutProfile).toBeDefined();
         expect(schema.operations.filletEdges).toBeDefined();
         expect(schema.operations.evaluateFace).toBeDefined();
     });

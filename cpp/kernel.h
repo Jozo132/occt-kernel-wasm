@@ -75,6 +75,12 @@ public:
      */
     uint32_t revolveProfile(const std::string& profileJson, const std::string& optionsJson);
 
+    /// Apply a structured additive profile revolve feature to a resident shape.
+    uint32_t revolveProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson);
+
+    /// Apply a structured subtractive profile revolve feature to a resident shape.
+    uint32_t revolveCutProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson);
+
     // -----------------------------------------------------------------------
     // Boolean operations
     // -----------------------------------------------------------------------
@@ -203,6 +209,11 @@ private:
                                     const std::string& identityStatus,
                                     const std::vector<std::string>& warnings);
     uint32_t performStructuredExtrudeFeature(uint32_t id,
+                                             const std::string& profileJson,
+                                             const std::string& specJson,
+                                             const std::string& operationType,
+                                             int fuseMode);
+    uint32_t performStructuredRevolveFeature(uint32_t id,
                                              const std::string& profileJson,
                                              const std::string& specJson,
                                              const std::string& operationType,

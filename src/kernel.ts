@@ -59,7 +59,10 @@ import type {
     ReleaseRevisionParams,
     ResolveStableEntityParams,
     RetainRevisionParams,
+    RevolveCutProfileFeatureParams,
     RevolveParams,
+    RevolveProfileFeatureParams,
+    RevolveProfileSpec,
     RevisionCheckpoint,
     RevisionInfo,
     RotationTransform,
@@ -96,6 +99,8 @@ export interface NativeKernel {
     extrudeProfileWithSpec?: (id: number, profileJson: string, specJson: string) => number;
     extrudeCutProfileWithSpec?: (id: number, profileJson: string, specJson: string) => number;
     revolveProfile(profileJson: string, optionsJson: string): number;
+    revolveProfileWithSpec?: (id: number, profileJson: string, specJson: string) => number;
+    revolveCutProfileWithSpec?: (id: number, profileJson: string, specJson: string) => number;
     booleanUnion(id1: number, id2: number): number;
     booleanSubtract(id1: number, id2: number): number;
     booleanIntersect(id1: number, id2: number): number;
@@ -456,6 +461,24 @@ interface RevolveOptionsPayload {
     axisDirection?: Vector3;
 }
 
+interface RevolveProfileSpecPayload {
+    schemaVersion: 1;
+    allowUnknownFields?: boolean;
+    unit?: { length?: 'model'; angle?: 'radians' | 'degrees' };
+    plane?: PlaneFrame;
+    axisOrigin?: Point3;
+    axisDirection?: Vector3;
+    reverseDirection?: boolean;
+    slidingEdges?: Array<{ profileEdgeIndex: number; face: FaceRef }>;
+    extent:
+        | { type: 'angle'; angleRadians: number }
+        | { type: 'upToSurface'; surface: { shapeId?: number; face: FaceRef } }
+        | { type: 'fromSurfaceToSurface'; fromSurface: { shapeId?: number; face: FaceRef }; untilSurface: { shapeId?: number; face: FaceRef } }
+        | { type: 'throughAll' }
+        | { type: 'upToSurfaceAtAngle'; surface: { shapeId?: number; face: FaceRef }; angleRadians: number };
+    metadata?: Record<string, unknown>;
+}
+
 function validateProfileSegment(segment: ProfileSegment, indexLabel: string): void {
     switch (segment.type) {
         case 'line':
@@ -656,6 +679,140 @@ function normalizeExtrudeProfileSpec(spec: ExtrudeProfileSpec): ExtrudeProfileSp
     };
 }
 
+function normalizeSurfaceTarget(
+    name: string,
+    surface: { readonly shape?: ShapeHandle; readonly face: FaceRef },
+): { shapeId?: number; face: FaceRef } {
+    return {
+        ...(surface.shape !== undefined ? { shapeId: surface.shape.id } : {}),
+        face: (() => {
+            requireFaceRef(surface.face, `${name}.face`);
+            return { ...surface.face };
+        })(),
+    };
+}
+
+function normalizeRevolveAngleRadians(
+    path: string,
+    angleRadians?: number,
+    angleDegrees?: number,
+): number {
+    const hasRadians = angleRadians !== undefined;
+    const hasDegrees = angleDegrees !== undefined;
+    if (hasRadians && hasDegrees) {
+        throw new KernelError('INVALID_PARAMS', `${path} must not specify both angleRadians and angleDegrees`);
+    }
+    if (!hasRadians && !hasDegrees) {
+        throw new KernelError('INVALID_PARAMS', `${path} must specify angleRadians or angleDegrees`);
+    }
+
+    if (hasRadians) {
+        requireFinite(angleRadians as number, `${path}.angleRadians`);
+        if ((angleRadians as number) === 0 || Math.abs(angleRadians as number) > Math.PI * 2) {
+            throw new KernelError('INVALID_PARAMS', `${path}.angleRadians must be in [-2pi, 2pi] excluding 0`);
+        }
+        return angleRadians as number;
+    }
+
+    requireFinite(angleDegrees as number, `${path}.angleDegrees`);
+    if ((angleDegrees as number) === 0 || Math.abs(angleDegrees as number) > 360) {
+        throw new KernelError('INVALID_PARAMS', `${path}.angleDegrees must be in [-360, 360] excluding 0`);
+    }
+    return (angleDegrees as number) * Math.PI / 180;
+}
+
+function normalizeRevolveProfileSpec(spec: RevolveProfileSpec): RevolveProfileSpecPayload {
+    requireSchemaVersion(spec, 'revolve spec');
+
+    const unit = spec.unit !== undefined
+        ? (() => {
+            if (spec.unit.length !== undefined && spec.unit.length !== 'model') {
+                throw new KernelError('INVALID_PARAMS', 'revolve spec.unit.length must be model');
+            }
+            if (spec.unit.angle !== undefined && spec.unit.angle !== 'radians' && spec.unit.angle !== 'degrees') {
+                throw new KernelError('INVALID_PARAMS', 'revolve spec.unit.angle must be radians or degrees');
+            }
+            return {
+                ...(spec.unit.length !== undefined ? { length: spec.unit.length } : {}),
+                ...(spec.unit.angle !== undefined ? { angle: spec.unit.angle } : {}),
+            } as { length?: 'model'; angle?: 'radians' | 'degrees' };
+        })()
+        : undefined;
+
+    const plane = normalizePlaneFrame(spec.plane);
+    const axisOrigin = spec.axisOrigin !== undefined
+        ? (() => {
+            requirePoint3(spec.axisOrigin, 'spec.axisOrigin');
+            return [...spec.axisOrigin] as Point3;
+        })()
+        : undefined;
+    const axisDirection = spec.axisDirection !== undefined
+        ? (() => {
+            requireVector3(spec.axisDirection, 'spec.axisDirection');
+            return [...spec.axisDirection] as Vector3;
+        })()
+        : undefined;
+
+    const slidingEdges = spec.slidingEdges !== undefined
+        ? spec.slidingEdges.map((entry, index) => {
+            requirePositiveInteger(entry.profileEdgeIndex, `spec.slidingEdges[${index}].profileEdgeIndex`);
+            requireFaceRef(entry.face, `spec.slidingEdges[${index}].face`);
+            return {
+                profileEdgeIndex: entry.profileEdgeIndex,
+                face: { ...entry.face },
+            };
+        })
+        : undefined;
+
+    const extent = (() => {
+        if (!spec.extent || typeof spec.extent !== 'object' || typeof spec.extent.type !== 'string') {
+            throw new KernelError('INVALID_PARAMS', 'spec.extent must be a structured extent descriptor');
+        }
+
+        switch (spec.extent.type) {
+            case 'angle':
+                return {
+                    type: 'angle' as const,
+                    angleRadians: normalizeRevolveAngleRadians('spec.extent', spec.extent.angleRadians, spec.extent.angleDegrees),
+                };
+            case 'upToSurface':
+                return {
+                    type: 'upToSurface' as const,
+                    surface: normalizeSurfaceTarget('spec.extent.surface', spec.extent.surface),
+                };
+            case 'fromSurfaceToSurface':
+                return {
+                    type: 'fromSurfaceToSurface' as const,
+                    fromSurface: normalizeSurfaceTarget('spec.extent.fromSurface', spec.extent.fromSurface),
+                    untilSurface: normalizeSurfaceTarget('spec.extent.untilSurface', spec.extent.untilSurface),
+                };
+            case 'throughAll':
+                return { type: 'throughAll' as const };
+            case 'upToSurfaceAtAngle':
+                return {
+                    type: 'upToSurfaceAtAngle' as const,
+                    surface: normalizeSurfaceTarget('spec.extent.surface', spec.extent.surface),
+                    angleRadians: normalizeRevolveAngleRadians('spec.extent', spec.extent.angleRadians, spec.extent.angleDegrees),
+                };
+            default:
+                throw new KernelError('INVALID_PARAMS', `spec.extent.type '${(spec.extent as { type: string }).type}' is not supported`);
+        }
+    })();
+
+    return {
+        schemaVersion: 1,
+        ...(spec.allowUnknownFields !== undefined ? { allowUnknownFields: spec.allowUnknownFields } : {}),
+        ...(unit ? { unit } : {}),
+        ...(plane ? { plane } : {}),
+        ...(axisOrigin ? { axisOrigin } : {}),
+        ...(axisDirection ? { axisDirection } : {}),
+        ...(spec.reverseDirection !== undefined ? { reverseDirection: spec.reverseDirection } : {}),
+        ...(slidingEdges !== undefined ? { slidingEdges } : {}),
+        extent,
+        ...(spec.metadata !== undefined ? { metadata: spec.metadata } : {}),
+    };
+}
+
 function normalizeRevolveOptions(params: RevolveParams): RevolveOptionsPayload {
     if (!Number.isFinite(params.angleDegrees) || params.angleDegrees <= 0 || params.angleDegrees > 360) {
         throw new KernelError('INVALID_PARAMS', 'angleDegrees must be in the range (0, 360]');
@@ -791,6 +948,35 @@ export class OcctKernel {
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
         const optionsJson = JSON.stringify(normalizeRevolveOptions(params));
         return makeHandle(wrap(() => this._native.revolveProfile(profileJson, optionsJson)));
+    }
+
+    /** Apply a versioned additive profile revolve feature spec to a resident shape. */
+    revolveProfileWithSpec(params: RevolveProfileFeatureParams): ShapeHandle {
+        if (params.cut === true) {
+            if (typeof this._native.revolveCutProfileWithSpec !== 'function') {
+                throw new KernelError('UNKNOWN', 'Native module does not support revolveCutProfileWithSpec');
+            }
+            const profileJson = JSON.stringify(normalizeProfile(params.profile));
+            const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec));
+            return makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+        }
+
+        if (typeof this._native.revolveProfileWithSpec !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support revolveProfileWithSpec');
+        }
+        const profileJson = JSON.stringify(normalizeProfile(params.profile));
+        const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec));
+        return makeHandle(wrap(() => this._native.revolveProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+    }
+
+    /** Apply a versioned subtractive profile revolve feature spec to a resident shape. */
+    revolveCutProfileWithSpec(params: RevolveCutProfileFeatureParams): ShapeHandle {
+        if (typeof this._native.revolveCutProfileWithSpec !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support revolveCutProfileWithSpec');
+        }
+        const profileJson = JSON.stringify(normalizeProfile(params.profile));
+        const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec));
+        return makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
     }
 
     // -----------------------------------------------------------------------
