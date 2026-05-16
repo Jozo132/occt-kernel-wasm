@@ -53,7 +53,7 @@
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <Law_Constant.hxx>
 #include <Law_Linear.hxx>
-#include <TColgp_Array1OfPnt2d.hxx>
+#include <NCollection_Array1.hxx>
 #include <TopExp_Explorer.hxx>
 
 // Tessellation
@@ -61,7 +61,6 @@
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Poly_PolygonOnTriangulation.hxx>
-#include <TColgp_Array1OfPnt.hxx>
 #include <Poly_Array1OfTriangle.hxx>
 #include <TShort_Array1OfShortReal.hxx>
 #include <gp_Vec.hxx>
@@ -83,9 +82,10 @@
 #include <ShapeFix_Shape.hxx>
 
 // Topology iteration
-#include <TopTools_IndexedMapOfShape.hxx>
-#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
-#include <TopTools_ListOfShape.hxx>
+#include <NCollection_IndexedMap.hxx>
+#include <NCollection_IndexedDataMap.hxx>
+#include <NCollection_List.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
 #include <TopExp.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 
@@ -112,6 +112,12 @@
 #endif
 
 namespace occt_kernel {
+
+using ShapeMap = NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>;
+using ShapeList = NCollection_List<TopoDS_Shape>;
+using ShapeToShapeListMap =
+    NCollection_IndexedDataMap<TopoDS_Shape, ShapeList, TopTools_ShapeMapHasher>;
+using Point2dArray = NCollection_Array1<gp_Pnt2d>;
 
 // ---------------------------------------------------------------------------
 // Internal error helpers
@@ -305,7 +311,7 @@ ShapeTransformOptions parseShapeTransformOptions(const std::string& transformJso
 
 TopoDS_Shape applyShapeTransform(const TopoDS_Shape& sourceShape, const gp_Trsf& transform, const std::string& context)
 {
-    BRepBuilderAPI_Transform transformer(sourceShape, transform, Standard_True);
+    BRepBuilderAPI_Transform transformer(sourceShape, transform, true);
     transformer.Build();
     if (!transformer.IsDone() || transformer.Shape().IsNull()) {
         throw std::runtime_error("Failed to apply " + context + " transform");
@@ -504,7 +510,7 @@ std::string makeFaceStableHash(const TopoDS_Face& face) {
     signature << "face|" << boundsSignature(face);
 
     try {
-        BRepAdaptor_Surface surface(face, Standard_False);
+        BRepAdaptor_Surface surface(face, false);
         signature << surfaceTypeName(surface.GetType()) << '|';
         if (surface.GetType() == GeomAbs_Plane) {
             gp_Dir normal = surface.Plane().Axis().Direction();
@@ -528,14 +534,14 @@ std::string makeVertexStableHash(const TopoDS_Vertex& vertex) {
 }
 
 std::vector<TopoDS_Face> uniqueAdjacentFaces(const TopoDS_Edge& edge,
-                                             const TopTools_IndexedDataMapOfShapeListOfShape& edgeToFaces) {
+                                             const ShapeToShapeListMap& edgeToFaces) {
     std::vector<TopoDS_Face> faces;
     if (!edgeToFaces.Contains(edge)) {
         return faces;
     }
 
-    const TopTools_ListOfShape& adjacent = edgeToFaces.FindFromKey(edge);
-    for (TopTools_ListOfShape::Iterator it(adjacent); it.More(); it.Next()) {
+    const ShapeList& adjacent = edgeToFaces.FindFromKey(edge);
+    for (ShapeList::Iterator it(adjacent); it.More(); it.Next()) {
         const TopoDS_Face face = TopoDS::Face(it.Value());
         const bool exists = std::any_of(faces.begin(), faces.end(), [&](const TopoDS_Face& current) {
             return current.IsSame(face);
@@ -548,8 +554,8 @@ std::vector<TopoDS_Face> uniqueAdjacentFaces(const TopoDS_Edge& edge,
 }
 
 std::vector<int> faceIdsForEdge(const TopoDS_Edge& edge,
-                                const TopTools_IndexedMapOfShape& faceMap,
-                                const TopTools_IndexedDataMapOfShapeListOfShape& edgeToFaces) {
+                                const ShapeMap& faceMap,
+                                const ShapeToShapeListMap& edgeToFaces) {
     std::vector<int> ids;
     for (const TopoDS_Face& face : uniqueAdjacentFaces(edge, edgeToFaces)) {
         const int id = faceMap.FindIndex(face);
@@ -650,8 +656,8 @@ bool isHardEdge(const TopoDS_Edge& edge, const std::vector<TopoDS_Face>& adjacen
     }
 
     try {
-        BRepAdaptor_Surface s1(adjacentFaces[0], Standard_False);
-        BRepAdaptor_Surface s2(adjacentFaces[1], Standard_False);
+        BRepAdaptor_Surface s1(adjacentFaces[0], false);
+        BRepAdaptor_Surface s2(adjacentFaces[1], false);
         return s1.GetType() != s2.GetType();
     } catch (...) {
         return true;
@@ -932,7 +938,7 @@ struct ResolvedFaceRef {
 };
 
 std::vector<std::string> faceStableHashesForShape(const TopoDS_Shape& shape, const RevisionMetadata* revision) {
-    TopTools_IndexedMapOfShape faces;
+    ShapeMap faces;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);
     std::vector<std::string> hashes(static_cast<std::size_t>(faces.Extent()) + 1);
     for (int i = 1; i <= faces.Extent(); ++i) {
@@ -944,10 +950,10 @@ std::vector<std::string> faceStableHashesForShape(const TopoDS_Shape& shape, con
 }
 
 std::vector<std::string> edgeStableHashesForShape(const TopoDS_Shape& shape, const RevisionMetadata* revision) {
-    TopTools_IndexedMapOfShape faces, edges;
+    ShapeMap faces, edges;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);
     TopExp::MapShapes(shape, TopAbs_EDGE, edges);
-    TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+    ShapeToShapeListMap edgeToFaces;
     TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
 
     std::vector<std::string> faceHashes = faceStableHashesForShape(shape, revision);
@@ -972,7 +978,7 @@ ResolvedEdgeRef resolveEdgeRef(const TopoDS_Shape& shape,
                                const std::string& operation,
                                const std::string& path) {
     const mini_json::Value& ref = mini_json::requireObject(refValue, path);
-    TopTools_IndexedMapOfShape edges;
+    ShapeMap edges;
     TopExp::MapShapes(shape, TopAbs_EDGE, edges);
     const std::vector<std::string> edgeHashes = edgeStableHashesForShape(shape, revision);
 
@@ -1012,7 +1018,7 @@ ResolvedFaceRef resolveFaceRef(const TopoDS_Shape& shape,
                                const std::string& operation,
                                const std::string& path) {
     const mini_json::Value& ref = mini_json::requireObject(refValue, path);
-    TopTools_IndexedMapOfShape faces;
+    ShapeMap faces;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);
     const std::vector<std::string> faceHashes = faceStableHashesForShape(shape, revision);
 
@@ -1073,9 +1079,9 @@ std::string stableEdgeRefString(const ResolvedEdgeRef& edge) {
 }
 
 std::vector<int> supportFaceIdsForEdge(const TopoDS_Shape& shape, const TopoDS_Edge& edge) {
-    TopTools_IndexedMapOfShape faceMap;
+    ShapeMap faceMap;
     TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
-    TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+    ShapeToShapeListMap edgeToFaces;
     TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
     return faceIdsForEdge(edge, faceMap, edgeToFaces);
 }
@@ -1097,9 +1103,9 @@ void appendBlendFacesJson(std::ostringstream& out,
     out << '[';
     bool firstFace = true;
     for (std::size_t i = 0; i < edges.size(); ++i) {
-        const TopTools_ListOfShape& generated = builder.Generated(edges[i].edge);
+        const ShapeList& generated = builder.Generated(edges[i].edge);
         std::vector<std::string> generatedFaceHashes;
-        for (TopTools_ListOfShape::Iterator it(generated); it.More(); it.Next()) {
+        for (ShapeList::Iterator it(generated); it.More(); it.Next()) {
             const std::string stableHash = faceHashForOutputFace(it.Value());
             if (!stableHash.empty()) {
                 generatedFaceHashes.push_back(stableHash);
@@ -1275,12 +1281,12 @@ RevisionMetadata parseRevisionMetadata(const mini_json::Value& value) {
 }
 
 std::string computeTopologyHash(const TopoDS_Shape& shape) {
-    TopTools_IndexedMapOfShape faces, edges, vertices;
+    ShapeMap faces, edges, vertices;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);
     TopExp::MapShapes(shape, TopAbs_EDGE, edges);
     TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
 
-    TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+    ShapeToShapeListMap edgeToFaces;
     TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
 
     std::vector<std::string> faceHashes(static_cast<std::size_t>(faces.Extent()) + 1);
@@ -1353,12 +1359,12 @@ struct StableEntityRecord {
 std::vector<StableEntityRecord> collectStableEntities(const TopoDS_Shape& shape, const RevisionMetadata* revision = nullptr) {
     std::vector<StableEntityRecord> records;
 
-    TopTools_IndexedMapOfShape faces, edges, vertices;
+    ShapeMap faces, edges, vertices;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);
     TopExp::MapShapes(shape, TopAbs_EDGE, edges);
     TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
 
-    TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+    ShapeToShapeListMap edgeToFaces;
     TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
 
     std::vector<std::string> faceHashes(static_cast<std::size_t>(faces.Extent()) + 1);
@@ -1493,7 +1499,7 @@ TopoDS_Shape applyImportHealing(const TopoDS_Shape& sourceShape,
         fixer->FixSameParameterMode() = (options.heal || options.fixSameParameter) ? 1 : 0;
         fixer->FixSolidMode() = (options.heal || options.fixSolid) ? 1 : 0;
         if (options.fixSolid) {
-            fixer->FixSolidTool()->CreateOpenSolidMode() = Standard_False;
+            fixer->FixSolidTool()->CreateOpenSolidMode() = false;
         }
 
         if (fixer->Perform()) {
@@ -1668,7 +1674,7 @@ StepImportRunResult runStepImport(const std::string& content, const StepImportOp
         addStepImportMessage(result.messages,
                              "transfer",
                              "fail",
-                             sf.GetMessageString());
+                             sf.what());
         return result;
     } catch (const std::exception& ex) {
         result.transferStatus = "FAILED";
@@ -1782,7 +1788,7 @@ uint32_t OcctKernel::createBox(double dx, double dy, double dz) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0; // unreachable
 }
@@ -1807,7 +1813,7 @@ uint32_t OcctKernel::createCylinder(double radius, double height) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -1832,7 +1838,7 @@ uint32_t OcctKernel::createSphere(double radius) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -1861,7 +1867,7 @@ uint32_t OcctKernel::extrudeProfile(const std::string& profileJson, const std::s
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -1887,7 +1893,7 @@ uint32_t OcctKernel::revolveProfile(const std::string& profileJson, const std::s
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -1928,7 +1934,7 @@ uint32_t OcctKernel::booleanUnion(uint32_t id1, uint32_t id2) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -1949,7 +1955,7 @@ uint32_t OcctKernel::booleanSubtract(uint32_t id1, uint32_t id2) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -1970,7 +1976,7 @@ uint32_t OcctKernel::booleanIntersect(uint32_t id1, uint32_t id2) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -2003,7 +2009,7 @@ uint32_t OcctKernel::filletEdges(uint32_t id, double radius) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -2015,7 +2021,7 @@ uint32_t OcctKernel::chamferEdges(uint32_t id, double distance) {
     try {
         const TopoDS_Shape& shape = requireShape(id);
         BRepFilletAPI_MakeChamfer mkChamfer(shape);
-        TopTools_IndexedMapOfShape edgeMap, faceMap;
+        ShapeMap edgeMap, faceMap;
         TopExp::MapShapes(shape, TopAbs_EDGE, edgeMap);
         TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
 
@@ -2048,7 +2054,7 @@ uint32_t OcctKernel::chamferEdges(uint32_t id, double distance) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -2144,7 +2150,7 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                     if (stations.array.size() < 2) {
                         throwStructuredValidation(operation, path + ".stations", "At least two radius stations are required");
                     }
-                    TColgp_Array1OfPnt2d table(1, static_cast<Standard_Integer>(stations.array.size()));
+                    Point2dArray table(1, static_cast<int>(stations.array.size()));
                     double previousT = -1.0;
                     normalized << "\"stations\":[";
                     for (std::size_t i = 0; i < stations.array.size(); ++i) {
@@ -2155,7 +2161,7 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                             throwStructuredValidation(operation, path + ".stations[].t", "Station t values must be finite, increasing, and in [0, 1]");
                         }
                         previousT = t;
-                        table.SetValue(static_cast<Standard_Integer>(i + 1), gp_Pnt2d(t, radius));
+                        table.SetValue(static_cast<int>(i + 1), gp_Pnt2d(t, radius));
                         if (i > 0) normalized << ',';
                         normalized << "{\"t\":" << t << ",\"radius\":" << radius << "}";
                     }
@@ -2207,7 +2213,7 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                 addFilletForEdge(edges.array[i], "fillet.edges[" + std::to_string(i) + "]");
             }
         } else {
-            TopTools_IndexedMapOfShape edges;
+            ShapeMap edges;
             TopExp::MapShapes(shape, TopAbs_EDGE, edges);
             if (edges.Extent() == 0) {
                 throwStructuredValidation(operation, "fillet.edges", "Shape has no edges to fillet");
@@ -2247,7 +2253,7 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwStructuredOperationError(operation, sf.GetMessageString());
+        throwStructuredOperationError(operation, sf.what());
     }
     return "{}";
 }
@@ -2369,7 +2375,7 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                 addChamferForEdge(edges.array[i], "chamfer.edges[" + std::to_string(i) + "]");
             }
         } else {
-            TopTools_IndexedMapOfShape edges;
+            ShapeMap edges;
             TopExp::MapShapes(shape, TopAbs_EDGE, edges);
             if (edges.Extent() == 0) {
                 throwStructuredValidation(operation, "chamfer.edges", "Shape has no edges to chamfer");
@@ -2409,7 +2415,7 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwStructuredOperationError(operation, sf.GetMessageString());
+        throwStructuredOperationError(operation, sf.what());
     }
     return "{}";
 }
@@ -2460,7 +2466,7 @@ uint32_t OcctKernel::transformShape(uint32_t id, const std::string& transformJso
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return 0;
 }
@@ -2479,12 +2485,12 @@ std::string OcctKernel::getTopology(uint32_t id) {
         const TopoDS_Shape& shape = record.shape;
         const RevisionMetadata& revision = record.revision;
 
-        TopTools_IndexedMapOfShape faces, edges, vertices;
+        ShapeMap faces, edges, vertices;
         TopExp::MapShapes(shape, TopAbs_FACE,   faces);
         TopExp::MapShapes(shape, TopAbs_EDGE,   edges);
         TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
 
-        TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+        ShapeToShapeListMap edgeToFaces;
         TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
 
         std::vector<std::string> faceHashes(static_cast<std::size_t>(faces.Extent()) + 1);
@@ -2619,7 +2625,7 @@ std::string OcctKernel::getTopology(uint32_t id) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return "{}";
 }
@@ -2637,7 +2643,7 @@ std::string OcctKernel::getRevisionInfo(uint32_t id) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return "{}";
 }
@@ -2693,7 +2699,7 @@ std::string OcctKernel::resolveStableEntity(uint32_t id, const std::string& stab
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return "{}";
 }
@@ -2761,7 +2767,7 @@ std::string OcctKernel::mapEntitiesAcrossRevisions(const std::string& fromRevisi
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return "{}";
 }
@@ -2805,7 +2811,7 @@ std::string OcctKernel::evaluateEdge(uint32_t id, const std::string& edgeRefJson
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return "{}";
 }
@@ -2870,7 +2876,7 @@ std::string OcctKernel::sampleEdge(uint32_t id, const std::string& edgeRefJson, 
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return "{}";
 }
@@ -2944,7 +2950,7 @@ std::string OcctKernel::getEdgeCurve(uint32_t id, const std::string& edgeRefJson
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return "{}";
 }
@@ -2958,7 +2964,7 @@ std::string OcctKernel::evaluateFace(uint32_t id, const std::string& faceRefJson
         }
         const mini_json::Value faceRef = mini_json::requireObject(mini_json::parse(faceRefJson), "faceRef");
         ResolvedFaceRef face = resolveFaceRef(it->second.shape, &it->second.revision, faceRef, operation, "faceRef");
-        BRepAdaptor_Surface surface(face.face, Standard_False);
+        BRepAdaptor_Surface surface(face.face, false);
         const double firstU = surface.FirstUParameter();
         const double lastU = surface.LastUParameter();
         const double firstV = surface.FirstVParameter();
@@ -2998,7 +3004,7 @@ std::string OcctKernel::evaluateFace(uint32_t id, const std::string& faceRefJson
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return "{}";
 }
@@ -3101,14 +3107,14 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
         const TopoDS_Shape& shape = record.shape;
         const RevisionMetadata& revision = record.revision;
 
-        BRepMesh_IncrementalMesh mesh(shape, linearDeflection, Standard_False, angularDeflection);
+        BRepMesh_IncrementalMesh mesh(shape, linearDeflection, false, angularDeflection);
         mesh.Perform();
 
-        TopTools_IndexedMapOfShape faceMap, edgeMap;
+        ShapeMap faceMap, edgeMap;
         TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
         TopExp::MapShapes(shape, TopAbs_EDGE, edgeMap);
 
-        TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+        ShapeToShapeListMap edgeToFaces;
         TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
 
         std::vector<std::string> faceHashes(static_cast<std::size_t>(faceMap.Extent()) + 1);
@@ -3301,7 +3307,7 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+        throwKernelError("OPERATION_FAILED", sf.what());
     }
     return "{}";
 }
@@ -3381,7 +3387,7 @@ std::string OcctKernel::exportStep(uint32_t id) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("EXPORT_FAILED", sf.GetMessageString());
+        throwKernelError("EXPORT_FAILED", sf.what());
     }
     return "";
 }
@@ -3418,7 +3424,7 @@ std::string OcctKernel::createCheckpoint(uint32_t id) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("EXPORT_FAILED", sf.GetMessageString());
+        throwKernelError("EXPORT_FAILED", sf.what());
     }
     return "{}";
 }
@@ -3475,7 +3481,7 @@ uint32_t OcctKernel::hydrateCheckpoint(const std::string& checkpointJson) {
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
-        throwKernelError("IMPORT_FAILED", sf.GetMessageString());
+        throwKernelError("IMPORT_FAILED", sf.what());
     }
     return 0;
 }

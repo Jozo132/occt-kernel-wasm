@@ -31,9 +31,7 @@
 #include <GC_MakeArcOfCircle.hxx>
 #include <GCE2d_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
-#include <TColgp_Array1OfPnt.hxx>
-#include <TColStd_Array1OfInteger.hxx>
-#include <TColStd_Array1OfReal.hxx>
+#include <NCollection_Array1.hxx>
 
 #include <cmath>
 #include <limits>
@@ -54,6 +52,9 @@ namespace occt_kernel {
 namespace {
 
 using mini_json::Value;
+using PointArray = NCollection_Array1<gp_Pnt>;
+using RealArray = NCollection_Array1<double>;
+using IntegerArray = NCollection_Array1<int>;
 
 struct BuiltWire {
     TopoDS_Wire wire;
@@ -99,14 +100,14 @@ int requireIntegerNumber(const Value& value, const std::string& context, int min
     return result;
 }
 
-TColgp_Array1OfPnt buildControlPointArray(const Value& controlPointsValue, const std::string& context, std::size_t minimumCount)
+PointArray buildControlPointArray(const Value& controlPointsValue, const std::string& context, std::size_t minimumCount)
 {
     const Value& controlPoints = mini_json::requireArray(controlPointsValue, context);
     if (controlPoints.array.size() < minimumCount) {
         throw std::runtime_error(context + " must contain at least " + std::to_string(minimumCount) + " points");
     }
 
-    TColgp_Array1OfPnt poles(1, static_cast<int>(controlPoints.array.size()));
+    PointArray poles(1, static_cast<int>(controlPoints.array.size()));
     for (std::size_t index = 0; index < controlPoints.array.size(); ++index) {
         const auto point = mini_json::requirePoint2(controlPoints.array[index], context + "[" + std::to_string(index) + "]");
         poles(static_cast<int>(index) + 1) = gp_Pnt(point[0], point[1], 0.0);
@@ -175,7 +176,7 @@ void appendCurveSampledPoints(const Handle(Geom_Curve)& curve, std::vector<std::
 
 Handle(Geom_BezierCurve) buildBezierCurve(const Value& segment, const std::string& context)
 {
-    const TColgp_Array1OfPnt poles = buildControlPointArray(
+    const PointArray poles = buildControlPointArray(
         mini_json::requireMember(segment, "controlPoints", context),
         context + ".controlPoints",
         2);
@@ -184,7 +185,7 @@ Handle(Geom_BezierCurve) buildBezierCurve(const Value& segment, const std::strin
 
 Handle(Geom_BSplineCurve) buildBSplineCurve(const Value& segment, const std::string& context)
 {
-    const TColgp_Array1OfPnt poles = buildControlPointArray(
+    const PointArray poles = buildControlPointArray(
         mini_json::requireMember(segment, "controlPoints", context),
         context + ".controlPoints",
         2);
@@ -212,14 +213,14 @@ Handle(Geom_BSplineCurve) buildBSplineCurve(const Value& segment, const std::str
         throw std::runtime_error(context + " has inconsistent controlPoints/degree/multiplicities");
     }
 
-    TColStd_Array1OfReal knotArray(1, static_cast<int>(knots.size()));
-    TColStd_Array1OfInteger multiplicityArray(1, static_cast<int>(multiplicities.size()));
+    RealArray knotArray(1, static_cast<int>(knots.size()));
+    IntegerArray multiplicityArray(1, static_cast<int>(multiplicities.size()));
     for (std::size_t index = 0; index < knots.size(); ++index) {
         knotArray(static_cast<int>(index) + 1) = knots[index];
         multiplicityArray(static_cast<int>(index) + 1) = multiplicities[index];
     }
 
-    return new Geom_BSplineCurve(poles, knotArray, multiplicityArray, degree, Standard_False);
+    return new Geom_BSplineCurve(poles, knotArray, multiplicityArray, degree, false);
 }
 
 BuiltWire buildWireFromSegments(const Value& segmentsValue, const std::string& context)
@@ -373,7 +374,7 @@ TopoDS_Face buildFaceFromProfile(const std::string& profileJson)
         throw std::runtime_error("Profile must contain at least one wire");
     }
 
-    BRepBuilderAPI_MakeFace mkFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), wires.front().wire, Standard_True);
+    BRepBuilderAPI_MakeFace mkFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), wires.front().wire, true);
     if (!mkFace.IsDone()) {
         throw std::runtime_error("Failed to build planar face from outer wire");
     }
