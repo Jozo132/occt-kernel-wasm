@@ -85,7 +85,7 @@
 // Topology iteration
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
-#include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopExp.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 
@@ -535,7 +535,7 @@ std::vector<TopoDS_Face> uniqueAdjacentFaces(const TopoDS_Edge& edge,
     }
 
     const TopTools_ListOfShape& adjacent = edgeToFaces.FindFromKey(edge);
-    for (TopTools_ListIteratorOfListOfShape it(adjacent); it.More(); it.Next()) {
+    for (TopTools_ListOfShape::Iterator it(adjacent); it.More(); it.Next()) {
         const TopoDS_Face face = TopoDS::Face(it.Value());
         const bool exists = std::any_of(faces.begin(), faces.end(), [&](const TopoDS_Face& current) {
             return current.IsSame(face);
@@ -1099,7 +1099,7 @@ void appendBlendFacesJson(std::ostringstream& out,
     for (std::size_t i = 0; i < edges.size(); ++i) {
         const TopTools_ListOfShape& generated = builder.Generated(edges[i].edge);
         std::vector<std::string> generatedFaceHashes;
-        for (TopTools_ListIteratorOfListOfShape it(generated); it.More(); it.Next()) {
+        for (TopTools_ListOfShape::Iterator it(generated); it.More(); it.Next()) {
             const std::string stableHash = faceHashForOutputFace(it.Value());
             if (!stableHash.empty()) {
                 generatedFaceHashes.push_back(stableHash);

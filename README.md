@@ -429,7 +429,7 @@ See [`examples/nodejs/demo.js`](examples/nodejs/demo.js) for a complete demo.
 | Node.js    | ≥ 18    | TypeScript / tests     |
 | CMake      | ≥ 3.20  | Build system           |
 | Emscripten | ≥ 3.1   | C++ → WASM             |
-| OCCT       | 7.8.x   | CAD kernel             |
+| OCCT       | 8.0.x   | CAD kernel             |
 
 ### Steps
 
@@ -448,6 +448,10 @@ npm run build
 ```
 
 On Windows, `npm run build:occt` and `npm run build:wasm` use the PowerShell wrappers in `scripts/` so the local Emscripten `.bat` entrypoints are used directly.
+
+The OCCT build scripts pin `V8_0_0` and keep the V8 source, build, and install trees in a versioned local cache outside the workspace by default. On Windows that defaults to `%LOCALAPPDATA%\occt-kernel-wasm\V8_0_0`; on Unix-like systems it defaults to `$XDG_CACHE_HOME/occt-kernel-wasm/V8_0_0` or `~/.cache/occt-kernel-wasm/V8_0_0`. Set `OCCT_WASM_CACHE_ROOT` to override that location.
+
+If the existing `third-party/occt-src` checkout has local changes, the build preserves it and uses the cached V8 checkout instead of overwriting that tree.
 
 For faster local iteration, use `npm run build:wasm:fast`. That uses a separate `Fast` CMake build with low optimization and no debug source maps, and the wrapper scripts reuse the existing CMake configure unless you explicitly request a reconfigure.
 

@@ -159,11 +159,12 @@ dist/*.map
 
 # Third-party dependencies (OCCT source + build)
 third-party/occt-src/
+third-party/occt-src-*/
 third-party/occt-build-wasm/
+third-party/occt-build-wasm-*/
 third-party/occt-wasm/
+third-party/occt-wasm-*/
 
 # Emscripten cache
 .emscripten_cache/
-build-wasm-fast/.ninja_lock
-build-wasm-fast/.ninja_log
-build-wasm-fast/.ninja_deps
+build-wasm-fast*/.ninja_*

@@ -33,7 +33,7 @@ in browser and Node.js environments, without leaking any OCCT types into JavaScr
 │  - Manages shape handle map (uint32_t → TopoDS_Shape)   │
 │  - All OCCT operations implemented here                 │
 ├─────────────────────────────────────────────────────────┤
-│  OCCT 7.8  (third-party, linked statically into WASM)   │
+│  OCCT 8.0  (third-party, linked statically into WASM)   │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -195,8 +195,10 @@ To add a new operation:
 
 See `scripts/build-occt.sh` for the pinned version and download URL. To upgrade:
 
-1. Update `OCCT_VERSION` in `scripts/build-occt.sh`.
-2. Re-run `scripts/build-occt.sh`.
-3. Re-run `scripts/build-wasm.sh`.
+1. Update `OCCT_VERSION` in `scripts/build-occt.sh`, `scripts/build-occt-wasm.ps1`, `scripts/build-wasm.sh`, and `scripts/build-wasm.ps1`.
+2. Re-run `scripts/build-occt.sh` or `npm run build:occt`.
+3. Re-run `scripts/build-wasm.sh` or `npm run build:wasm`.
 4. Run the full test suite to verify no regressions.
 5. Update `THIRD_PARTY_LICENSES.md` if the OCCT license text changed.
+
+When the existing `third-party/occt-src` checkout is dirty, the OCCT build scripts preserve it and use a clean versioned source checkout in the OCCT cache for the requested tag instead. The default cache root is outside the workspace (`%LOCALAPPDATA%\occt-kernel-wasm` on Windows, `$XDG_CACHE_HOME/occt-kernel-wasm` or `~/.cache/occt-kernel-wasm` on Unix-like systems) so the OCCT 8 source and build trees do not sit under the OneDrive-backed repo path.

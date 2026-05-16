@@ -65,7 +65,15 @@ case "${BUILD_TYPE}" in
     fast)    CMAKE_BUILD_TYPE="Fast" ;;
 esac
 
-OCCT_INSTALL_DIR="${REPO_ROOT}/third-party/occt-wasm"
+OCCT_VERSION="V8_0_0"
+if [ -n "${OCCT_WASM_CACHE_ROOT:-}" ]; then
+    OCCT_CACHE_ROOT="${OCCT_WASM_CACHE_ROOT}"
+elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+    OCCT_CACHE_ROOT="${XDG_CACHE_HOME}/occt-kernel-wasm"
+else
+    OCCT_CACHE_ROOT="${HOME}/.cache/occt-kernel-wasm"
+fi
+OCCT_INSTALL_DIR="${OCCT_CACHE_ROOT}/${OCCT_VERSION}/i"
 WASM_BUILD_DIR="${REPO_ROOT}/build-wasm-${CMAKE_BUILD_TYPE,,}"
 
 if [ ! -d "${OCCT_INSTALL_DIR}" ]; then
@@ -89,7 +97,7 @@ fi
 
 mkdir -p "${WASM_BUILD_DIR}"
 
-if [ ! -f "${WASM_BUILD_DIR}/CMakeCache.txt" ] || [ "${RECONFIGURE}" -eq 1 ]; then
+if [ ! -f "${WASM_BUILD_DIR}/CMakeCache.txt" ] || [ "${RECONFIGURE}" -eq 1 ] || ! grep -Fq "${OCCT_INSTALL_DIR}" "${WASM_BUILD_DIR}/CMakeCache.txt"; then
     echo "[build-wasm] Configuring (${CMAKE_BUILD_TYPE})..."
     emcmake cmake -S "${REPO_ROOT}" -B "${WASM_BUILD_DIR}" \
         -DCMAKE_TOOLCHAIN_FILE="${EMSCRIPTEN_TOOLCHAIN}" \

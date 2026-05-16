@@ -24,7 +24,17 @@ $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
 $REPO_ROOT = "c:\Users\HP\OneDrive\Documents\C++ Projects\occt-kernel-wasm"
 $EMSDK_ROOT = "C:\Users\HP\OneDrive\Documents\node\WASM"
 $TOOLCHAIN = "$EMSDK_ROOT\upstream\emscripten\cmake\Modules\Platform\Emscripten.cmake"
-$OCCT_INSTALL = "$REPO_ROOT\third-party\occt-wasm"
+$OCCT_VERSION = "V8_0_0"
+if ($env:OCCT_WASM_CACHE_ROOT) {
+    $OcctCacheRoot = $env:OCCT_WASM_CACHE_ROOT
+}
+elseif ($env:LOCALAPPDATA) {
+    $OcctCacheRoot = Join-Path $env:LOCALAPPDATA "occt-kernel-wasm"
+}
+else {
+    $OcctCacheRoot = Join-Path $env:TEMP "occt-kernel-wasm"
+}
+$OCCT_INSTALL = Join-Path (Join-Path $OcctCacheRoot $OCCT_VERSION) "i"
 
 $normalizedBuildType = $BuildType.ToLowerInvariant()
 switch ($normalizedBuildType) {
@@ -45,7 +55,15 @@ try {
     New-Item -ItemType Directory -Force -Path $BUILD_DIR | Out-Null
 
     $cacheFile = Join-Path $BUILD_DIR "CMakeCache.txt"
-    if ($Reconfigure -or -not (Test-Path $cacheFile)) {
+    $needsConfigure = $Reconfigure -or -not (Test-Path $cacheFile)
+    if (-not $needsConfigure) {
+        $cacheContents = Get-Content $cacheFile -Raw
+        if ($cacheContents -notmatch [regex]::Escape($OCCT_INSTALL)) {
+            $needsConfigure = $true
+        }
+    }
+
+    if ($needsConfigure) {
         Write-Host "[build-wasm] Configuring ($cmakeBuildType)..."
         $cmakeArgs = @(
             "-S", $REPO_ROOT,

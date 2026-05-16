@@ -41,17 +41,12 @@ set(OCCT_KERNEL_MINIMAL_OCCT_LIBRARIES
     TKPrim
     TKBO
     TKBool
-    TKHLR
     TKFillet
     TKOffset
-    TKFeat
     TKShHealing
     TKMesh
-    TKXMesh
-    TKDE
     TKXSBase
     TKDESTEP
-    TKService
 )
 
 # ---------------------------------------------------------------------------
@@ -72,10 +67,17 @@ find_package(OpenCASCADE QUIET
 )
 
 if(NOT OpenCASCADE_FOUND)
+    find_package(OpenCASCADE QUIET)
+endif()
+
+if(NOT OpenCASCADE_FOUND)
     # Try alternative package name used by some OCCT builds
     find_package(OCCT QUIET
         COMPONENTS ${OCCT_KERNEL_REQUIRED_COMPONENTS}
     )
+    if(NOT OCCT_FOUND)
+        find_package(OCCT QUIET)
+    endif()
     if(OCCT_FOUND)
         set(OpenCASCADE_FOUND TRUE)
         set(OpenCASCADE_INCLUDE_DIR ${OCCT_INCLUDE_DIR})
