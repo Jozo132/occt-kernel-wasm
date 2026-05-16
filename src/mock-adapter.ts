@@ -134,6 +134,70 @@ export class MockNativeKernel {
         };
     }
 
+    private _validateRef(value: Record<string, unknown>, label: string): void {
+        if (value.topoId === undefined && value.stableHash === undefined) {
+            throw new KernelError('INVALID_PARAMS', `${label} must include topoId or stableHash`);
+        }
+        if (value.topoId !== undefined && !isPositiveInteger(value.topoId)) {
+            throw new KernelError('INVALID_PARAMS', `${label}.topoId must be a positive integer`);
+        }
+        if (value.stableHash !== undefined && typeof value.stableHash !== 'string') {
+            throw new KernelError('INVALID_PARAMS', `${label}.stableHash must be a string`);
+        }
+    }
+
+    private _validateBlendSpec(spec: Record<string, unknown>, label: 'fillet' | 'chamfer'): void {
+        if (spec.schemaVersion !== 1) {
+            throw new KernelError('INVALID_PARAMS', `${label}.schemaVersion must be 1`);
+        }
+        if (spec.limits !== undefined) {
+            throw new KernelError('INVALID_PARAMS', JSON.stringify({ phase: 'validation', operation: `${label}Edges`, path: `${label}.limits`, unsupportedFeature: `${label}.partialEdge` }));
+        }
+        if (spec.tangentPropagation === false) {
+            throw new KernelError('INVALID_PARAMS', JSON.stringify({ phase: 'validation', operation: `${label}Edges`, path: `${label}.tangentPropagation`, unsupportedFeature: `${label}.nonPropagatingEdges` }));
+        }
+        if (spec.cornerMode !== undefined && spec.cornerMode !== 'rollingBall') {
+            throw new KernelError('INVALID_PARAMS', JSON.stringify({ phase: 'validation', operation: `${label}Edges`, path: `${label}.cornerMode`, unsupportedFeature: `${label}.cornerModes` }));
+        }
+
+        if (Array.isArray(spec.edges)) {
+            for (const [index, entry] of spec.edges.entries()) {
+                const object = entry as Record<string, unknown>;
+                if (object.limits !== undefined) {
+                    throw new KernelError('INVALID_PARAMS', JSON.stringify({ phase: 'validation', operation: `${label}Edges`, path: `${label}.edges[${index}].limits`, unsupportedFeature: `${label}.partialEdge` }));
+                }
+                if (object.tangentPropagation === false) {
+                    throw new KernelError('INVALID_PARAMS', JSON.stringify({ phase: 'validation', operation: `${label}Edges`, path: `${label}.edges[${index}].tangentPropagation`, unsupportedFeature: `${label}.nonPropagatingEdges` }));
+                }
+                const ref = (object.edge ?? object.edgeRef ?? object) as Record<string, unknown>;
+                this._validateRef(ref, `${label}.edges[${index}]`);
+            }
+        }
+    }
+
+    private _blendResult(shapeId: number, kind: 'filletFace' | 'chamferFace', edgeCount: number): string {
+        const revision = this._revisionInfo(shapeId);
+        const topology = JSON.parse(this.getTopology(shapeId)) as Record<string, unknown>;
+        const blendFaces = Array.from({ length: edgeCount }, (_, index) => ({
+            kind,
+            stableHash: `${kind === 'filletFace' ? 'F' : 'C'}:mock_blend_${shapeId}_${index + 1}`,
+            sourceEdge: { topoId: index + 1, stableHash: `E:mock_source_${index + 1}` },
+            tangentChainEdgeRefs: [{ topoId: index + 1, stableHash: `E:mock_source_${index + 1}` }],
+            usedParameters: {},
+            supportingFaceIds: [1, 2],
+            terminalCapIds: [],
+            terminalCondition: 'unresolved',
+        }));
+        return JSON.stringify({
+            shapeId,
+            revision,
+            topology,
+            lineage: { generated: blendFaces, modified: [], retained: [], deleted: blendFaces.map((_, index) => `E:mock_source_${index + 1}`) },
+            blendFaces,
+            status: { isPartial: false, isClipped: false, isHealed: false, isExact: true },
+        });
+    }
+
     // -- Primitives --
 
     createBox(dx: number, dy: number, dz: number): number {
@@ -352,6 +416,24 @@ export class MockNativeKernel {
         return this._store('chamfer', { id, distance });
     }
 
+    filletEdgesWithSpec(id: number, specJson: string): string {
+        this._require(id);
+        const spec = JSON.parse(specJson) as Record<string, unknown>;
+        this._validateBlendSpec(spec, 'fillet');
+        const edgeCount = Array.isArray(spec.edges) ? Math.max(spec.edges.length, 1) : 12;
+        const shapeId = this._store('fillet', { id, spec });
+        return this._blendResult(shapeId, 'filletFace', edgeCount);
+    }
+
+    chamferEdgesWithSpec(id: number, specJson: string): string {
+        this._require(id);
+        const spec = JSON.parse(specJson) as Record<string, unknown>;
+        this._validateBlendSpec(spec, 'chamfer');
+        const edgeCount = Array.isArray(spec.edges) ? Math.max(spec.edges.length, 1) : 12;
+        const shapeId = this._store('chamfer', { id, spec });
+        return this._blendResult(shapeId, 'chamferFace', edgeCount);
+    }
+
     transformShape(id: number, transformJson: string): number {
         this._require(id);
         const transform = this._parseShapeTransform(transformJson);
@@ -440,6 +522,84 @@ export class MockNativeKernel {
         });
     }
 
+    evaluateEdge(id: number, edgeRefJson: string, t: number): string {
+        this._require(id);
+        const edgeRef = JSON.parse(edgeRefJson) as Record<string, unknown>;
+        this._validateRef(edgeRef, 'edgeRef');
+        return JSON.stringify({
+            edge: { topoId: edgeRef.topoId ?? 1, stableHash: edgeRef.stableHash ?? 'E:mock_edge_1' },
+            curveType: 'line',
+            parameter: t,
+            normalizedParameter: t,
+            domain: { first: 0, last: 1 },
+            point: [t, 0, 0],
+            tangent: [1, 0, 0],
+        });
+    }
+
+    sampleEdge(id: number, edgeRefJson: string, optionsJson: string): string {
+        this._require(id);
+        const edgeRef = JSON.parse(edgeRefJson) as Record<string, unknown>;
+        const options = JSON.parse(optionsJson) as Record<string, unknown>;
+        this._validateRef(edgeRef, 'edgeRef');
+        const count = typeof options.count === 'number' ? options.count : 16;
+        const samples = Array.from({ length: count }, (_, index) => {
+            const t = count === 1 ? 0 : index / (count - 1);
+            return { parameter: t, normalizedParameter: t, point: [t, 0, 0], tangent: [1, 0, 0] };
+        });
+        return JSON.stringify({
+            edge: { topoId: edgeRef.topoId ?? 1, stableHash: edgeRef.stableHash ?? 'E:mock_edge_1' },
+            curveType: 'line',
+            domain: { first: 0, last: 1 },
+            samples,
+        });
+    }
+
+    getEdgeCurve(id: number, edgeRefJson: string): string {
+        this._require(id);
+        const edgeRef = JSON.parse(edgeRefJson) as Record<string, unknown>;
+        this._validateRef(edgeRef, 'edgeRef');
+        return JSON.stringify({
+            edge: { topoId: edgeRef.topoId ?? 1, stableHash: edgeRef.stableHash ?? 'E:mock_edge_1' },
+            curveType: 'line',
+            domain: { first: 0, last: 1 },
+            startPoint: [0, 0, 0],
+            endPoint: [1, 0, 0],
+            line: { origin: [0, 0, 0], direction: [1, 0, 0] },
+        });
+    }
+
+    evaluateFace(id: number, faceRefJson: string, u: number, v: number): string {
+        this._require(id);
+        const faceRef = JSON.parse(faceRefJson) as Record<string, unknown>;
+        this._validateRef(faceRef, 'faceRef');
+        return JSON.stringify({
+            face: { topoId: faceRef.topoId ?? 1, stableHash: faceRef.stableHash ?? 'F:mock_face_1' },
+            surfaceType: 'plane',
+            uv: [u, v],
+            normalizedUv: [u, v],
+            domain: { u: [0, 1], v: [0, 1] },
+            point: [u, v, 0],
+            dU: [1, 0, 0],
+            dV: [0, 1, 0],
+            normal: [0, 0, 1],
+        });
+    }
+
+    getOperationSchema(): string {
+        return JSON.stringify({
+            schemaVersion: 1,
+            operations: {
+                filletEdges: { schemaVersion: 1, nativeExact: true },
+                chamferEdges: { schemaVersion: 1, nativeExact: true },
+                evaluateEdge: { schemaVersion: 1, nativeExact: true },
+                sampleEdge: { schemaVersion: 1, nativeExact: true },
+                getEdgeCurve: { schemaVersion: 1, nativeExact: true },
+                evaluateFace: { schemaVersion: 1, nativeExact: true },
+            },
+        });
+    }
+
     getCapabilities(): string {
         return JSON.stringify({
             featureEdgesV1: true,
@@ -455,6 +615,45 @@ export class MockNativeKernel {
             historyV1: true,
             stableNamingV1: false,
             checkpointV1: true,
+            operations: {
+                structuredSpecsV1: true,
+                operationSchemaV1: true,
+                nativeExactBlendOpsV1: true,
+                exactSubshapeEvaluationV1: true,
+            },
+            fillet: {
+                schemaVersion: 1,
+                nativeExact: true,
+                constantRadius: true,
+                startEndRadius: true,
+                stationRadii: true,
+                lawRadius: ['constant', 'linear'],
+                tangentPropagation: true,
+                partialEdges: false,
+                setbackCorners: false,
+                blendShape: ['rational', 'quasiAngular', 'polynomial'],
+                continuity: ['C0', 'C1', 'C2'],
+                overflowModes: ['fail'],
+            },
+            chamfer: {
+                schemaVersion: 1,
+                nativeExact: true,
+                symmetric: true,
+                twoDistance: true,
+                distanceAngle: true,
+                referenceFace: true,
+                tangentPropagation: true,
+                partialEdges: false,
+                setbackCorners: false,
+                overflowModes: ['fail'],
+            },
+            subshapeEvaluation: {
+                evaluateEdge: true,
+                sampleEdge: true,
+                getEdgeCurve: true,
+                evaluateFace: true,
+                parameterModes: ['normalized', 'native'],
+            },
         });
     }
 

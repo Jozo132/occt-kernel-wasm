@@ -24,6 +24,8 @@ It is designed to be consumed by modelling applications focused on SolidWorks-li
 | Sketch revolution              | ✅     |
 | Boolean union / subtract / intersect | ✅ |
 | Fillet / chamfer               | ✅     |
+| Structured native blend specs  | ✅     |
+| Exact edge/face interrogation  | ✅     |
 | Topology query (faces/edges/vertices/bbox) | ✅ |
 | Validity check                | ✅     |
 | Tessellation for WebGL        | ✅     |
@@ -157,6 +159,71 @@ const filleted = kernel.filletEdges({ shape: box, radius: 2 });
 const chamfered = kernel.chamferEdges({ shape: box, distance: 1.5 });
 ```
 
+Simple modifiers keep their original all-edge behavior. For feature-level CAD workflows, use the structured native blend APIs so OCCT owns exact blend construction and the JS layer receives lineage metadata instead of rebuilding blends from mesh edges.
+
+```ts
+const topo = kernel.getTopology(box);
+const edge = topo.edges?.[0];
+const referenceFace = edge?.topoFaceIds?.[0];
+
+const filletResult = kernel.filletEdgesWithSpec({
+    shape: box,
+    spec: {
+        schemaVersion: 1,
+        edges: [{ topoId: edge?.id ?? 1, radius: 2 }],
+        blendShape: 'rational',
+        continuity: 'C1',
+        overflowMode: 'fail',
+    },
+});
+
+const chamferResult = kernel.chamferEdgesWithSpec({
+    shape: box,
+    spec: {
+        schemaVersion: 1,
+        mode: 'twoDistance',
+        edges: [{
+            topoId: edge?.id ?? 1,
+            distance1: 1,
+            distance2: 2,
+            referenceFace: { topoId: referenceFace ?? 1 },
+        }],
+    },
+});
+
+const nextShape = filletResult.shape;
+const generatedBlendFaces = filletResult.blendFaces;
+```
+
+Fillets support constant radius, start/end radius, station radii, constant and linear radius laws, OCCT fillet shape modes (`rational`, `quasiAngular`, `polynomial`), and C0/C1/C2 continuity. Chamfers support symmetric, two-distance, and distance-angle modes with reference-face side selection. Tangent propagation is native and enabled. Partial-edge blends, disabled tangent propagation, and setback-style corner handling are reported as structured unsupported `INVALID_PARAMS` errors in this OCCT-backed build.
+
+### Exact subshape evaluation
+
+```ts
+const edgeEval = kernel.evaluateEdge({
+    shape: box,
+    edge: { topoId: 1 },
+    t: 0.5,
+});
+
+const edgeSamples = kernel.sampleEdge({
+    shape: box,
+    edge: { topoId: 1 },
+    count: 16,
+});
+
+const edgeCurve = kernel.getEdgeCurve({ shape: box, edge: { topoId: 1 } });
+
+const faceEval = kernel.evaluateFace({
+    shape: box,
+    face: { topoId: 1 },
+    u: 0.5,
+    v: 0.5,
+});
+```
+
+Edge and face references accept a runtime `topoId` or a `stableHash`. Edge and face evaluation use normalized parameters by default; pass `parameterMode: 'native'` on the reference to use the OCCT curve or surface parameter domain directly. `getEdgeCurve` returns analytic line/circle metadata where available and Bezier/B-spline poles, weights, knots, and multiplicities for exact curve types.
+
 ### Topology query
 
 ```ts
@@ -176,9 +243,15 @@ const topo = kernel.getTopology(box);
 
 const capabilities = kernel.getCapabilities();
 // featureEdgesV1, triangleNormalsV1, topologySubshapesV1, historyV1,
-// entityRemapV1, revisionRetentionV1, and checkpointV1 are available.
+// entityRemapV1, revisionRetentionV1, checkpointV1, and native exact blend
+// operations are available. capabilities.fillet / capabilities.chamfer
+// describe supported modes and explicitly false unsupported modes.
 // stableNamingV1 remains false until full semantic naming for booleans,
 // fillets/chamfers, and healed imports is proven beyond geometry-derived ids.
+
+const schema = kernel.getOperationSchema();
+// Versioned machine-readable operation contracts for structured fillet,
+// chamfer, evaluateEdge, sampleEdge, getEdgeCurve, and evaluateFace.
 ```
 
 ### Revision history, remap, and checkpoints

@@ -36,6 +36,8 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         // Modifiers
         .function("filletEdges",  &OcctKernel::filletEdges)
         .function("chamferEdges", &OcctKernel::chamferEdges)
+        .function("filletEdgesWithSpec", &OcctKernel::filletEdgesWithSpec)
+        .function("chamferEdgesWithSpec", &OcctKernel::chamferEdgesWithSpec)
         .function("transformShape", &OcctKernel::transformShape)
 
         // Queries
@@ -43,6 +45,11 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         .function("getRevisionInfo", &OcctKernel::getRevisionInfo)
         .function("resolveStableEntity", &OcctKernel::resolveStableEntity)
         .function("mapEntitiesAcrossRevisions", &OcctKernel::mapEntitiesAcrossRevisions)
+        .function("evaluateEdge", &OcctKernel::evaluateEdge)
+        .function("sampleEdge", &OcctKernel::sampleEdge)
+        .function("getEdgeCurve", &OcctKernel::getEdgeCurve)
+        .function("evaluateFace", &OcctKernel::evaluateFace)
+        .function("getOperationSchema", &OcctKernel::getOperationSchema)
         .function("getCapabilities", &OcctKernel::getCapabilities)
         .function("checkValidity",  &OcctKernel::checkValidity)
 

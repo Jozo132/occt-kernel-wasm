@@ -20,16 +20,27 @@
 import { KernelError, parseNativeError } from './errors';
 import type {
     BooleanParams,
+    BlendOperationResult,
     BoundingBox,
     BoxParams,
+    ChamferFeatureParams,
     ChamferParams,
     CreateCheckpointParams,
     CylinderParams,
     DisposeParams,
+    EdgeCurveResult,
+    EdgeEvaluationParams,
+    EdgeEvaluationResult,
+    EdgeRef,
+    EdgeSampleResult,
     EntityRevisionMapResult,
     ExportStepParams,
     ExtrudeParams,
+    FaceEvaluationParams,
+    FaceEvaluationResult,
+    FaceRef,
     FeatureEdgeChain,
+    FilletFeatureParams,
     FilletParams,
     ImportStepDetailedResult,
     ImportStepParams,
@@ -49,6 +60,7 @@ import type {
     RevisionCheckpoint,
     RevisionInfo,
     RotationTransform,
+    SampleEdgeParams,
     ShapeHandle,
     ShapeTransform,
     SphereParams,
@@ -62,6 +74,7 @@ import type {
     TopologyResult,
     TransformParams,
     Vector3,
+    OperationSchema,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -83,11 +96,18 @@ export interface NativeKernel {
     booleanIntersect(id1: number, id2: number): number;
     filletEdges(id: number, radius: number): number;
     chamferEdges(id: number, distance: number): number;
+    filletEdgesWithSpec?: (id: number, specJson: string) => string;
+    chamferEdgesWithSpec?: (id: number, specJson: string) => string;
     transformShape(id: number, transformJson: string): number;
     getTopology(id: number): string;
     getRevisionInfo?: (id: number) => string;
     resolveStableEntity?: (id: number, stableHash: string) => string;
     mapEntitiesAcrossRevisions?: (fromRevisionId: string, toRevisionId: string, stableHashesJson: string) => string;
+    evaluateEdge?: (id: number, edgeRefJson: string, t: number) => string;
+    sampleEdge?: (id: number, edgeRefJson: string, optionsJson: string) => string;
+    getEdgeCurve?: (id: number, edgeRefJson: string) => string;
+    evaluateFace?: (id: number, faceRefJson: string, u: number, v: number) => string;
+    getOperationSchema?: () => string;
     getCapabilities?: () => string;
     checkValidity(id: number): boolean;
     tessellate(id: number, linearDeflection: number, angularDeflection: number): string;
@@ -179,6 +199,70 @@ function requirePositiveInteger(value: number, name: string): void {
     if (!Number.isInteger(value) || value <= 0) {
         throw new KernelError('INVALID_PARAMS', `${name} must be a positive integer`);
     }
+}
+
+function requireSchemaVersion(value: { readonly schemaVersion?: number }, name: string): void {
+    if (value.schemaVersion !== 1) {
+        throw new KernelError('INVALID_PARAMS', `${name}.schemaVersion must be 1`);
+    }
+}
+
+function throwStructuredInvalid(operation: string, path: string, reason: string, unsupportedFeature?: string): never {
+    throw new KernelError('INVALID_PARAMS', JSON.stringify({
+        phase: 'validation',
+        operation,
+        path,
+        reason,
+        ...(unsupportedFeature !== undefined ? { unsupportedFeature } : {}),
+    }));
+}
+
+function requireSupportedBlendControls(
+    operation: 'filletEdges' | 'chamferEdges',
+    path: string,
+    value: {
+        readonly limits?: unknown;
+        readonly tangentPropagation?: boolean;
+        readonly cornerMode?: string;
+        readonly overflowMode?: string;
+    },
+): void {
+    const family = operation === 'filletEdges' ? 'fillet' : 'chamfer';
+    if (value.limits !== undefined) {
+        throwStructuredInvalid(operation, `${path}.limits`, 'Partial-edge blends are not exposed by this OCCT build', `${family}.partialEdge`);
+    }
+    if (value.tangentPropagation === false) {
+        throwStructuredInvalid(operation, `${path}.tangentPropagation`, 'Disabling tangent propagation is not exposed by this OCCT build', `${family}.nonPropagatingEdges`);
+    }
+    if (value.cornerMode !== undefined && value.cornerMode !== 'rollingBall') {
+        throwStructuredInvalid(operation, `${path}.cornerMode`, 'Only rollingBall corner handling is supported by this OCCT build', `${family}.cornerModes`);
+    }
+    if (value.overflowMode !== undefined && value.overflowMode !== 'fail') {
+        throwStructuredInvalid(operation, `${path}.overflowMode`, 'Only fail-fast overflow handling is supported by this OCCT build', `${family}.overflowModes`);
+    }
+}
+
+function requireEdgeRef(value: EdgeRef, name: string): void {
+    if (value.topoId === undefined && value.stableHash === undefined) {
+        throw new KernelError('INVALID_PARAMS', `${name} must include topoId or stableHash`);
+    }
+    if (value.topoId !== undefined) {
+        requirePositiveInteger(value.topoId, `${name}.topoId`);
+    }
+    if (value.stableHash !== undefined && value.stableHash.length === 0) {
+        throw new KernelError('INVALID_PARAMS', `${name}.stableHash must be non-empty`);
+    }
+}
+
+function requireFaceRef(value: FaceRef, name: string): void {
+    requireEdgeRef(value, name);
+}
+
+function withShapeHandle(result: Omit<BlendOperationResult, 'shape'>): BlendOperationResult {
+    return {
+        ...result,
+        shape: makeHandle(result.shapeId),
+    };
 }
 
 function requirePoint2Array(values: readonly Point2[], name: string, minimumLength: number): void {
@@ -611,6 +695,48 @@ export class OcctKernel {
         return makeHandle(wrap(() => this._native.chamferEdges(params.shape.id, params.distance)));
     }
 
+    /** Apply a versioned native OCCT fillet spec and return exact blend lineage. */
+    filletEdgesWithSpec(params: FilletFeatureParams): BlendOperationResult {
+        if (typeof this._native.filletEdgesWithSpec !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support filletEdgesWithSpec');
+        }
+        requireSchemaVersion(params.spec, 'fillet spec');
+        requireSupportedBlendControls('filletEdges', 'fillet', params.spec);
+        if (params.spec.edges !== undefined) {
+            params.spec.edges.forEach((entry, index) => {
+                const edge = entry.edge ?? entry.edgeRef ?? entry;
+                requireEdgeRef(edge, `fillet spec.edges[${index}]`);
+                requireSupportedBlendControls('filletEdges', `fillet.edges[${index}]`, entry);
+            });
+        }
+        const raw = wrap(() => this._native.filletEdgesWithSpec?.(params.shape.id, JSON.stringify(params.spec)) ?? '{}');
+        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'fillet result'));
+    }
+
+    /** Apply a versioned native OCCT chamfer spec and return exact blend lineage. */
+    chamferEdgesWithSpec(params: ChamferFeatureParams): BlendOperationResult {
+        if (typeof this._native.chamferEdgesWithSpec !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support chamferEdgesWithSpec');
+        }
+        requireSchemaVersion(params.spec, 'chamfer spec');
+        requireSupportedBlendControls('chamferEdges', 'chamfer', params.spec);
+        if (params.spec.referenceFace !== undefined) {
+            requireFaceRef(params.spec.referenceFace, 'chamfer spec.referenceFace');
+        }
+        if (params.spec.edges !== undefined) {
+            params.spec.edges.forEach((entry, index) => {
+                const edge = entry.edge ?? entry.edgeRef ?? entry;
+                requireEdgeRef(edge, `chamfer spec.edges[${index}]`);
+                requireSupportedBlendControls('chamferEdges', `chamfer.edges[${index}]`, entry);
+                if (entry.referenceFace !== undefined) {
+                    requireFaceRef(entry.referenceFace, `chamfer spec.edges[${index}].referenceFace`);
+                }
+            });
+        }
+        const raw = wrap(() => this._native.chamferEdgesWithSpec?.(params.shape.id, JSON.stringify(params.spec)) ?? '{}');
+        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'chamfer result'));
+    }
+
     /**
      * Apply a world-space transform to a resident shape and return a new handle.
      * When both are provided, rotation is applied before translation.
@@ -669,6 +795,65 @@ export class OcctKernel {
             JSON.stringify(params.stableHashes),
         ) ?? '{}');
         return parseJson<EntityRevisionMapResult>(raw, 'entity revision mapping');
+    }
+
+    /** Evaluate an exact edge point/tangent without tessellation. */
+    evaluateEdge(params: EdgeEvaluationParams): EdgeEvaluationResult {
+        if (typeof this._native.evaluateEdge !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support evaluateEdge');
+        }
+        requireEdgeRef(params.edge, 'edge');
+        requireFinite(params.t, 't');
+        const raw = wrap(() => this._native.evaluateEdge?.(params.shape.id, JSON.stringify(params.edge), params.t) ?? '{}');
+        return parseJson<EdgeEvaluationResult>(raw, 'edge evaluation');
+    }
+
+    /** Sample an exact edge curve without tessellation. */
+    sampleEdge(params: SampleEdgeParams): EdgeSampleResult {
+        if (typeof this._native.sampleEdge !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support sampleEdge');
+        }
+        requireEdgeRef(params.edge, 'edge');
+        if (params.count !== undefined) requirePositiveInteger(params.count, 'count');
+        const options = {
+            count: params.count,
+            start: params.start,
+            end: params.end,
+            normalized: params.normalized,
+            includeTangents: params.includeTangents,
+        };
+        const raw = wrap(() => this._native.sampleEdge?.(params.shape.id, JSON.stringify(params.edge), JSON.stringify(options)) ?? '{}');
+        return parseJson<EdgeSampleResult>(raw, 'edge samples');
+    }
+
+    /** Return exact curve metadata for an edge. */
+    getEdgeCurve(params: { readonly shape: ShapeHandle; readonly edge: EdgeRef }): EdgeCurveResult {
+        if (typeof this._native.getEdgeCurve !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support getEdgeCurve');
+        }
+        requireEdgeRef(params.edge, 'edge');
+        const raw = wrap(() => this._native.getEdgeCurve?.(params.shape.id, JSON.stringify(params.edge)) ?? '{}');
+        return parseJson<EdgeCurveResult>(raw, 'edge curve');
+    }
+
+    /** Evaluate an exact face point/normal without tessellation. */
+    evaluateFace(params: FaceEvaluationParams): FaceEvaluationResult {
+        if (typeof this._native.evaluateFace !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support evaluateFace');
+        }
+        requireFaceRef(params.face, 'face');
+        requireFinite(params.u, 'u');
+        requireFinite(params.v, 'v');
+        const raw = wrap(() => this._native.evaluateFace?.(params.shape.id, JSON.stringify(params.face), params.u, params.v) ?? '{}');
+        return parseJson<FaceEvaluationResult>(raw, 'face evaluation');
+    }
+
+    /** Return the versioned operation schema advertised by the native kernel. */
+    getOperationSchema(): OperationSchema {
+        if (typeof this._native.getOperationSchema !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support getOperationSchema');
+        }
+        return parseJson<OperationSchema>(wrap(() => this._native.getOperationSchema?.() ?? '{}'), 'operation schema');
     }
 
     /** Return true when the shape is geometrically and topologically valid. */

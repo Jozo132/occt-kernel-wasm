@@ -197,6 +197,237 @@ export interface ChamferParams {
     readonly distance: number;
 }
 
+export interface EdgeRef {
+    readonly topoId?: number;
+    readonly stableHash?: string;
+    /** Defaults to `normalized` for evaluation APIs. */
+    readonly parameterMode?: 'normalized' | 'native';
+    readonly normalized?: boolean;
+}
+
+export interface FaceRef {
+    readonly topoId?: number;
+    readonly stableHash?: string;
+    /** Defaults to `normalized` for evaluation APIs. */
+    readonly parameterMode?: 'normalized' | 'native';
+    readonly normalized?: boolean;
+}
+
+export interface RadiusStation {
+    readonly t: number;
+    readonly radius: number;
+}
+
+export type FilletRadiusLaw =
+    | { readonly type: 'constant'; readonly radius: number }
+    | { readonly type: 'linear'; readonly startRadius: number; readonly endRadius: number };
+
+export interface FilletEdgeSpec {
+    readonly edge?: EdgeRef;
+    readonly edgeRef?: EdgeRef;
+    readonly topoId?: number;
+    readonly stableHash?: string;
+    readonly radiusMode?: 'constant' | 'variable' | 'startEnd' | 'law';
+    readonly radius?: number;
+    readonly startRadius?: number;
+    readonly endRadius?: number;
+    readonly stations?: readonly RadiusStation[];
+    readonly law?: FilletRadiusLaw;
+    readonly tangentPropagation?: boolean;
+    readonly limits?: { readonly start: number; readonly end: number; readonly normalized?: boolean };
+    readonly cornerMode?: 'rollingBall' | 'setback';
+    readonly overflowMode?: 'fail' | 'clamp' | 'heal';
+}
+
+export interface FilletSpec {
+    readonly schemaVersion: 1;
+    readonly allowUnknownFields?: boolean;
+    readonly unit?: { readonly length?: 'model'; readonly angle?: 'radians' | 'degrees' };
+    readonly edges?: readonly FilletEdgeSpec[];
+    readonly radiusMode?: 'constant' | 'variable' | 'startEnd' | 'law';
+    readonly radius?: number;
+    readonly startRadius?: number;
+    readonly endRadius?: number;
+    readonly stations?: readonly RadiusStation[];
+    readonly law?: FilletRadiusLaw;
+    readonly tangentPropagation?: boolean;
+    readonly limits?: { readonly start: number; readonly end: number; readonly normalized?: boolean };
+    readonly cornerMode?: 'rollingBall' | 'setback';
+    readonly blendShape?: 'rational' | 'quasiAngular' | 'polynomial';
+    readonly continuity?: 'C0' | 'C1' | 'C2' | 'G0' | 'G1' | 'G2';
+    readonly angularTolerance?: number;
+    readonly overflowMode?: 'fail' | 'clamp' | 'heal';
+    readonly metadata?: Record<string, unknown>;
+}
+
+export interface ChamferEdgeSpec {
+    readonly edge?: EdgeRef;
+    readonly edgeRef?: EdgeRef;
+    readonly topoId?: number;
+    readonly stableHash?: string;
+    readonly mode?: 'symmetric' | 'twoDistance' | 'distanceAngle';
+    readonly distance?: number;
+    readonly distance1?: number;
+    readonly distance2?: number;
+    readonly angleRadians?: number;
+    readonly angleDegrees?: number;
+    readonly referenceFace?: FaceRef;
+    readonly tangentPropagation?: boolean;
+    readonly limits?: { readonly start: number; readonly end: number; readonly normalized?: boolean };
+    readonly cornerMode?: 'rollingBall' | 'setback';
+    readonly overflowMode?: 'fail' | 'clamp' | 'heal';
+}
+
+export interface ChamferSpec {
+    readonly schemaVersion: 1;
+    readonly allowUnknownFields?: boolean;
+    readonly unit?: { readonly length?: 'model'; readonly angle?: 'radians' | 'degrees' };
+    readonly edges?: readonly ChamferEdgeSpec[];
+    readonly mode?: 'symmetric' | 'twoDistance' | 'distanceAngle';
+    readonly distance?: number;
+    readonly distance1?: number;
+    readonly distance2?: number;
+    readonly angleRadians?: number;
+    readonly angleDegrees?: number;
+    readonly referenceFace?: FaceRef;
+    readonly tangentPropagation?: boolean;
+    readonly limits?: { readonly start: number; readonly end: number; readonly normalized?: boolean };
+    readonly cornerMode?: 'rollingBall' | 'setback';
+    readonly overflowMode?: 'fail' | 'clamp' | 'heal';
+    readonly metadata?: Record<string, unknown>;
+}
+
+export interface FilletFeatureParams {
+    readonly shape: ShapeHandle;
+    readonly spec: FilletSpec;
+}
+
+export interface ChamferFeatureParams {
+    readonly shape: ShapeHandle;
+    readonly spec: ChamferSpec;
+}
+
+export interface BlendFaceResult {
+    readonly kind: 'filletFace' | 'chamferFace';
+    readonly stableHash: string | null;
+    readonly sourceEdge: EdgeRef;
+    readonly tangentChainEdgeRefs: readonly EdgeRef[];
+    readonly usedParameters: Record<string, unknown>;
+    readonly supportingFaceIds: readonly number[];
+    readonly terminalCapIds: readonly number[];
+    readonly terminalCondition: 'unresolved' | 'open' | 'closed' | 'capped';
+}
+
+export interface BlendOperationResult {
+    readonly shape: ShapeHandle;
+    readonly shapeId: number;
+    readonly revision: RevisionInfo;
+    readonly topology: TopologyResult;
+    readonly lineage: {
+        readonly generated: readonly BlendFaceResult[];
+        readonly modified: readonly unknown[];
+        readonly retained: readonly unknown[];
+        readonly deleted: readonly string[];
+    };
+    readonly blendFaces: readonly BlendFaceResult[];
+    readonly status: {
+        readonly isPartial: boolean;
+        readonly isClipped: boolean;
+        readonly isHealed: boolean;
+        readonly isExact: boolean;
+    };
+}
+
+export interface EdgeEvaluationParams {
+    readonly shape: ShapeHandle;
+    readonly edge: EdgeRef;
+    /** Normalized [0, 1] unless `edge.parameterMode` is `native`. */
+    readonly t: number;
+}
+
+export interface EdgeEvaluationResult {
+    readonly edge: EdgeRef;
+    readonly curveType: string;
+    readonly parameter: number;
+    readonly normalizedParameter: number;
+    readonly domain: { readonly first: number; readonly last: number };
+    readonly point: Point3;
+    readonly tangent: Vector3 | null;
+}
+
+export interface SampleEdgeParams {
+    readonly shape: ShapeHandle;
+    readonly edge: EdgeRef;
+    readonly count?: number;
+    readonly start?: number;
+    readonly end?: number;
+    readonly normalized?: boolean;
+    readonly includeTangents?: boolean;
+}
+
+export interface EdgeSample {
+    readonly parameter: number;
+    readonly normalizedParameter: number;
+    readonly point: Point3;
+    readonly tangent?: Vector3 | null;
+}
+
+export interface EdgeSampleResult {
+    readonly edge: EdgeRef;
+    readonly curveType: string;
+    readonly domain: { readonly first: number; readonly last: number };
+    readonly samples: readonly EdgeSample[];
+}
+
+export interface EdgeCurveResult {
+    readonly edge: EdgeRef;
+    readonly curveType: string;
+    readonly domain: { readonly first: number; readonly last: number };
+    readonly startPoint: Point3;
+    readonly endPoint: Point3;
+    readonly line?: { readonly origin: Point3; readonly direction: Vector3 };
+    readonly circle?: { readonly center: Point3; readonly radius: number; readonly normal: Vector3 };
+    readonly bspline?: {
+        readonly degree: number;
+        readonly periodic: boolean;
+        readonly poles: readonly Point3[];
+        readonly weights: readonly number[];
+        readonly knots: readonly number[];
+        readonly multiplicities: readonly number[];
+    };
+    readonly bezier?: {
+        readonly degree: number;
+        readonly poles: readonly Point3[];
+        readonly weights: readonly number[];
+    };
+}
+
+export interface FaceEvaluationParams {
+    readonly shape: ShapeHandle;
+    readonly face: FaceRef;
+    /** Normalized [0, 1] unless `face.parameterMode` is `native`. */
+    readonly u: number;
+    /** Normalized [0, 1] unless `face.parameterMode` is `native`. */
+    readonly v: number;
+}
+
+export interface FaceEvaluationResult {
+    readonly face: FaceRef;
+    readonly surfaceType: string;
+    readonly uv: readonly [number, number];
+    readonly normalizedUv: readonly [number, number];
+    readonly domain: { readonly u: readonly [number, number]; readonly v: readonly [number, number] };
+    readonly point: Point3;
+    readonly dU: Vector3;
+    readonly dV: Vector3;
+    readonly normal: Vector3 | null;
+}
+
+export interface OperationSchema {
+    readonly schemaVersion: number;
+    readonly operations: Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // Tessellation
 // ---------------------------------------------------------------------------
@@ -420,6 +651,45 @@ export interface KernelCapabilities {
     readonly historyV1: boolean;
     readonly stableNamingV1: boolean;
     readonly checkpointV1: boolean;
+    readonly operations?: {
+        readonly structuredSpecsV1?: boolean;
+        readonly operationSchemaV1?: boolean;
+        readonly nativeExactBlendOpsV1?: boolean;
+        readonly exactSubshapeEvaluationV1?: boolean;
+    };
+    readonly fillet?: {
+        readonly schemaVersion: number;
+        readonly nativeExact: boolean;
+        readonly constantRadius: boolean;
+        readonly startEndRadius: boolean;
+        readonly stationRadii: boolean;
+        readonly lawRadius: readonly string[];
+        readonly tangentPropagation: boolean;
+        readonly partialEdges: boolean;
+        readonly setbackCorners: boolean;
+        readonly blendShape: readonly string[];
+        readonly continuity: readonly string[];
+        readonly overflowModes: readonly string[];
+    };
+    readonly chamfer?: {
+        readonly schemaVersion: number;
+        readonly nativeExact: boolean;
+        readonly symmetric: boolean;
+        readonly twoDistance: boolean;
+        readonly distanceAngle: boolean;
+        readonly referenceFace: boolean;
+        readonly tangentPropagation: boolean;
+        readonly partialEdges: boolean;
+        readonly setbackCorners: boolean;
+        readonly overflowModes: readonly string[];
+    };
+    readonly subshapeEvaluation?: {
+        readonly evaluateEdge: boolean;
+        readonly sampleEdge: boolean;
+        readonly getEdgeCurve: boolean;
+        readonly evaluateFace: boolean;
+        readonly parameterModes: readonly string[];
+    };
 }
 
 // ---------------------------------------------------------------------------

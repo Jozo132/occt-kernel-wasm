@@ -38,6 +38,8 @@
 #include <gp_Ax1.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Lin.hxx>
+#include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 
@@ -49,6 +51,9 @@
 // Fillets / chamfers
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
+#include <Law_Constant.hxx>
+#include <Law_Linear.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
 #include <TopExp_Explorer.hxx>
 
 // Tessellation
@@ -63,6 +68,8 @@
 #include <gp_Pnt2d.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom_Surface.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_BezierCurve.hxx>
 
 // STEP import/export
 #include <STEPControl_Reader.hxx>
@@ -660,6 +667,14 @@ void appendPointArrayJson(std::ostringstream& out, const std::vector<gp_Pnt>& po
     out << ']';
 }
 
+void appendPointJson(std::ostringstream& out, const gp_Pnt& point) {
+    out << '[' << point.X() << ',' << point.Y() << ',' << point.Z() << ']';
+}
+
+void appendVectorJson(std::ostringstream& out, const gp_Vec& vector) {
+    out << '[' << vector.X() << ',' << vector.Y() << ',' << vector.Z() << ']';
+}
+
 bool samePointWithinTolerance(const gp_Pnt& a, const gp_Pnt& b) {
     return a.SquareDistance(b) <= 1.0e-18;
 }
@@ -767,6 +782,400 @@ int optionalIntMember(const mini_json::Value& object, const std::string& key, in
         return fallback;
     }
     return static_cast<int>(mini_json::requireNumber(*value, key));
+}
+
+double optionalNumberMember(const mini_json::Value& object, const std::string& key, double fallback = 0.0) {
+    const mini_json::Value* value = object.get(key);
+    if (value == nullptr || value->kind == mini_json::Value::Kind::Null) {
+        return fallback;
+    }
+    return mini_json::requireNumber(*value, key);
+}
+
+bool hasMember(const mini_json::Value& object, const std::string& key) {
+    return object.kind == mini_json::Value::Kind::Object && object.get(key) != nullptr;
+}
+
+void throwStructuredValidation(const std::string& operation,
+                               const std::string& path,
+                               const std::string& reason,
+                               const std::string& unsupportedFeature = "") {
+    std::ostringstream detail;
+    detail << "{";
+    detail << "\"phase\":\"validation\",";
+    detail << "\"operation\":"; appendJsonString(detail, operation); detail << ",";
+    detail << "\"path\":"; appendJsonString(detail, path); detail << ",";
+    detail << "\"reason\":"; appendJsonString(detail, reason);
+    if (!unsupportedFeature.empty()) {
+        detail << ",\"unsupportedFeature\":"; appendJsonString(detail, unsupportedFeature);
+    }
+    detail << "}";
+    throwKernelError("INVALID_PARAMS", detail.str());
+}
+
+void throwStructuredOperationError(const std::string& operation,
+                                   const std::string& reason,
+                                   const std::vector<std::string>& edgeRefs = {}) {
+    std::ostringstream detail;
+    detail << "{";
+    detail << "\"phase\":\"execution\",";
+    detail << "\"operation\":"; appendJsonString(detail, operation); detail << ",";
+    detail << "\"reason\":"; appendJsonString(detail, reason); detail << ",";
+    detail << "\"failingEdgeRefs\":"; appendStringArrayJson(detail, edgeRefs);
+    detail << "}";
+    throwKernelError("OPERATION_FAILED", detail.str());
+}
+
+void rejectUnknownFields(const mini_json::Value& object,
+                         const std::set<std::string>& allowedKeys,
+                         const std::string& operation,
+                         const std::string& context,
+                         bool allowUnknownFields) {
+    if (allowUnknownFields || object.kind != mini_json::Value::Kind::Object) {
+        return;
+    }
+    for (const auto& entry : object.object) {
+        if (allowedKeys.count(entry.first) == 0) {
+            throwStructuredValidation(operation,
+                                      context + "." + entry.first,
+                                      "Unknown field is not allowed for this schema version",
+                                      "unknownField");
+        }
+    }
+}
+
+int requireSchemaVersion(const mini_json::Value& root, const std::string& operation) {
+    if (!hasMember(root, "schemaVersion")) {
+        throwStructuredValidation(operation, "schemaVersion", "schemaVersion is required");
+    }
+    const int version = optionalIntMember(root, "schemaVersion", 0);
+    if (version != 1) {
+        throwStructuredValidation(operation, "schemaVersion", "Only schemaVersion 1 is supported", "schemaVersion");
+    }
+    return version;
+}
+
+double requirePositiveMember(const mini_json::Value& object,
+                             const std::string& key,
+                             const std::string& operation,
+                             const std::string& path) {
+    if (!hasMember(object, key)) {
+        throwStructuredValidation(operation, path, "Required positive number is missing");
+    }
+    const double value = optionalNumberMember(object, key, 0.0);
+    if (!std::isfinite(value) || value <= 0.0) {
+        throwStructuredValidation(operation, path, "Value must be a finite number > 0");
+    }
+    return value;
+}
+
+double optionalAngleRadians(const mini_json::Value& object,
+                            const std::string& operation,
+                            const std::string& path) {
+    if (hasMember(object, "angleRadians")) {
+        const double angle = optionalNumberMember(object, "angleRadians", 0.0);
+        if (!std::isfinite(angle) || angle <= 0.0 || angle >= M_PI) {
+            throwStructuredValidation(operation, path + ".angleRadians", "angleRadians must be finite and in (0, pi)");
+        }
+        return angle;
+    }
+    if (hasMember(object, "angleDegrees")) {
+        const double angle = optionalNumberMember(object, "angleDegrees", 0.0);
+        if (!std::isfinite(angle) || angle <= 0.0 || angle >= 180.0) {
+            throwStructuredValidation(operation, path + ".angleDegrees", "angleDegrees must be finite and in (0, 180)");
+        }
+        return angle * M_PI / 180.0;
+    }
+    throwStructuredValidation(operation, path, "Distance-angle chamfer requires angleRadians or angleDegrees");
+    return 0.0;
+}
+
+std::string objectToStableSignature(const mini_json::Value& value) {
+    if (value.kind == mini_json::Value::Kind::Null) return "null";
+    if (value.kind == mini_json::Value::Kind::Bool) return value.boolean ? "true" : "false";
+    if (value.kind == mini_json::Value::Kind::Number) return coordinateKey(value.number);
+    if (value.kind == mini_json::Value::Kind::String) return "s:" + value.string;
+    if (value.kind == mini_json::Value::Kind::Array) {
+        std::ostringstream out;
+        out << "[";
+        for (const mini_json::Value& entry : value.array) {
+            out << objectToStableSignature(entry) << ";";
+        }
+        out << "]";
+        return out.str();
+    }
+
+    std::vector<std::pair<std::string, std::string>> members;
+    for (const auto& entry : value.object) {
+        members.push_back({ entry.first, objectToStableSignature(entry.second) });
+    }
+    std::sort(members.begin(), members.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::ostringstream out;
+    out << "{";
+    for (const auto& member : members) {
+        out << member.first << ":" << member.second << ";";
+    }
+    out << "}";
+    return out.str();
+}
+
+struct ResolvedEdgeRef {
+    TopoDS_Edge edge;
+    int topoId = 0;
+    std::string stableHash;
+};
+
+struct ResolvedFaceRef {
+    TopoDS_Face face;
+    int topoId = 0;
+    std::string stableHash;
+};
+
+std::vector<std::string> faceStableHashesForShape(const TopoDS_Shape& shape, const RevisionMetadata* revision) {
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    std::vector<std::string> hashes(static_cast<std::size_t>(faces.Extent()) + 1);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        hashes[static_cast<std::size_t>(i)] = revision != nullptr && revision->faceStableHashes.size() == static_cast<std::size_t>(faces.Extent())
+            ? revision->faceStableHashes[static_cast<std::size_t>(i - 1)]
+            : makeFaceStableHash(TopoDS::Face(faces(i)));
+    }
+    return hashes;
+}
+
+std::vector<std::string> edgeStableHashesForShape(const TopoDS_Shape& shape, const RevisionMetadata* revision) {
+    TopTools_IndexedMapOfShape faces, edges;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
+
+    std::vector<std::string> faceHashes = faceStableHashesForShape(shape, revision);
+    std::vector<std::string> edgeHashes(static_cast<std::size_t>(edges.Extent()) + 1);
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        if (revision != nullptr && revision->edgeStableHashes.size() == static_cast<std::size_t>(edges.Extent())) {
+            edgeHashes[static_cast<std::size_t>(i)] = revision->edgeStableHashes[static_cast<std::size_t>(i - 1)];
+            continue;
+        }
+        std::vector<std::string> adjacentFaceHashes;
+        for (int faceId : faceIdsForEdge(TopoDS::Edge(edges(i)), faces, edgeToFaces)) {
+            adjacentFaceHashes.push_back(faceHashes[static_cast<std::size_t>(faceId)]);
+        }
+        edgeHashes[static_cast<std::size_t>(i)] = makeEdgeStableHash(TopoDS::Edge(edges(i)), adjacentFaceHashes);
+    }
+    return edgeHashes;
+}
+
+ResolvedEdgeRef resolveEdgeRef(const TopoDS_Shape& shape,
+                               const RevisionMetadata* revision,
+                               const mini_json::Value& refValue,
+                               const std::string& operation,
+                               const std::string& path) {
+    const mini_json::Value& ref = mini_json::requireObject(refValue, path);
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    const std::vector<std::string> edgeHashes = edgeStableHashesForShape(shape, revision);
+
+    if (hasMember(ref, "topoId")) {
+        const int topoId = optionalIntMember(ref, "topoId", 0);
+        if (topoId < 1 || topoId > edges.Extent()) {
+            throwStructuredValidation(operation, path + ".topoId", "Edge topoId is outside the current topology");
+        }
+        ResolvedEdgeRef result;
+        result.edge = TopoDS::Edge(edges(topoId));
+        result.topoId = topoId;
+        result.stableHash = edgeHashes[static_cast<std::size_t>(topoId)];
+        return result;
+    }
+
+    if (hasMember(ref, "stableHash")) {
+        const std::string stableHash = optionalStringMember(ref, "stableHash");
+        for (int i = 1; i <= edges.Extent(); ++i) {
+            if (edgeHashes[static_cast<std::size_t>(i)] == stableHash) {
+                ResolvedEdgeRef result;
+                result.edge = TopoDS::Edge(edges(i));
+                result.topoId = i;
+                result.stableHash = stableHash;
+                return result;
+            }
+        }
+        throwStructuredValidation(operation, path + ".stableHash", "No edge with this stableHash exists in the current topology");
+    }
+
+    throwStructuredValidation(operation, path, "Edge reference requires topoId or stableHash");
+    return ResolvedEdgeRef();
+}
+
+ResolvedFaceRef resolveFaceRef(const TopoDS_Shape& shape,
+                               const RevisionMetadata* revision,
+                               const mini_json::Value& refValue,
+                               const std::string& operation,
+                               const std::string& path) {
+    const mini_json::Value& ref = mini_json::requireObject(refValue, path);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    const std::vector<std::string> faceHashes = faceStableHashesForShape(shape, revision);
+
+    if (hasMember(ref, "topoId")) {
+        const int topoId = optionalIntMember(ref, "topoId", 0);
+        if (topoId < 1 || topoId > faces.Extent()) {
+            throwStructuredValidation(operation, path + ".topoId", "Face topoId is outside the current topology");
+        }
+        return { TopoDS::Face(faces(topoId)), topoId, faceHashes[static_cast<std::size_t>(topoId)] };
+    }
+
+    if (hasMember(ref, "stableHash")) {
+        const std::string stableHash = optionalStringMember(ref, "stableHash");
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            if (faceHashes[static_cast<std::size_t>(i)] == stableHash) {
+                return { TopoDS::Face(faces(i)), i, stableHash };
+            }
+        }
+        throwStructuredValidation(operation, path + ".stableHash", "No face with this stableHash exists in the current topology");
+    }
+
+    throwStructuredValidation(operation, path, "Face reference requires topoId or stableHash");
+    return ResolvedFaceRef();
+}
+
+void appendEntityRefJson(std::ostringstream& out, const ResolvedEdgeRef& edge) {
+    out << "{";
+    out << "\"topoId\":" << edge.topoId << ",";
+    out << "\"stableHash\":"; appendJsonString(out, edge.stableHash);
+    out << "}";
+}
+
+void appendEntityRefJson(std::ostringstream& out, const ResolvedFaceRef& face) {
+    out << "{";
+    out << "\"topoId\":" << face.topoId << ",";
+    out << "\"stableHash\":"; appendJsonString(out, face.stableHash);
+    out << "}";
+}
+
+ChFi3d_FilletShape parseFilletShape(const std::string& value, const std::string& operation, const std::string& path) {
+    if (value.empty() || value == "rational") return ChFi3d_Rational;
+    if (value == "quasiAngular") return ChFi3d_QuasiAngular;
+    if (value == "polynomial") return ChFi3d_Polynomial;
+    throwStructuredValidation(operation, path, "Unsupported fillet blendShape", "fillet.blendShape");
+    return ChFi3d_Rational;
+}
+
+GeomAbs_Shape parseContinuity(const std::string& value, const std::string& operation, const std::string& path) {
+    if (value.empty() || value == "C1" || value == "G1") return GeomAbs_C1;
+    if (value == "C0" || value == "G0") return GeomAbs_C0;
+    if (value == "C2" || value == "G2") return GeomAbs_C2;
+    throwStructuredValidation(operation, path, "Unsupported continuity mode", "fillet.continuityModes");
+    return GeomAbs_C1;
+}
+
+std::string stableEdgeRefString(const ResolvedEdgeRef& edge) {
+    return edge.stableHash.empty() ? ("topoId:" + std::to_string(edge.topoId)) : edge.stableHash;
+}
+
+std::vector<int> supportFaceIdsForEdge(const TopoDS_Shape& shape, const TopoDS_Edge& edge) {
+    TopTools_IndexedMapOfShape faceMap;
+    TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
+    return faceIdsForEdge(edge, faceMap, edgeToFaces);
+}
+
+std::string faceHashForOutputFace(const TopoDS_Shape& maybeFace) {
+    if (maybeFace.IsNull() || maybeFace.ShapeType() != TopAbs_FACE) {
+        return "";
+    }
+    return makeFaceStableHash(TopoDS::Face(maybeFace));
+}
+
+template <typename BlendBuilder>
+void appendBlendFacesJson(std::ostringstream& out,
+                          BlendBuilder& builder,
+                          const TopoDS_Shape& sourceShape,
+                          const std::vector<ResolvedEdgeRef>& edges,
+                          const std::vector<std::string>& normalizedParameters,
+                          const std::string& faceKind) {
+    out << '[';
+    bool firstFace = true;
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        const TopTools_ListOfShape& generated = builder.Generated(edges[i].edge);
+        std::vector<std::string> generatedFaceHashes;
+        for (TopTools_ListIteratorOfListOfShape it(generated); it.More(); it.Next()) {
+            const std::string stableHash = faceHashForOutputFace(it.Value());
+            if (!stableHash.empty()) {
+                generatedFaceHashes.push_back(stableHash);
+            }
+        }
+
+        if (generatedFaceHashes.empty()) {
+            if (!firstFace) out << ',';
+            firstFace = false;
+            out << '{';
+            out << "\"kind\":"; appendJsonString(out, faceKind); out << ',';
+            out << "\"stableHash\":null,";
+            out << "\"sourceEdge\":"; appendEntityRefJson(out, edges[i]); out << ',';
+            out << "\"tangentChainEdgeRefs\":["; appendEntityRefJson(out, edges[i]); out << "],";
+            out << "\"usedParameters\":" << normalizedParameters[i] << ',';
+            out << "\"supportingFaceIds\":"; appendIntArrayJson(out, supportFaceIdsForEdge(sourceShape, edges[i].edge)); out << ',';
+            out << "\"terminalCapIds\":[],";
+            out << "\"terminalCondition\":\"unresolved\"";
+            out << '}';
+            continue;
+        }
+
+        for (const std::string& stableHash : generatedFaceHashes) {
+            if (!firstFace) out << ',';
+            firstFace = false;
+            out << '{';
+            out << "\"kind\":"; appendJsonString(out, faceKind); out << ',';
+            out << "\"stableHash\":"; appendJsonString(out, stableHash); out << ',';
+            out << "\"sourceEdge\":"; appendEntityRefJson(out, edges[i]); out << ',';
+            out << "\"tangentChainEdgeRefs\":["; appendEntityRefJson(out, edges[i]); out << "],";
+            out << "\"usedParameters\":" << normalizedParameters[i] << ',';
+            out << "\"supportingFaceIds\":"; appendIntArrayJson(out, supportFaceIdsForEdge(sourceShape, edges[i].edge)); out << ',';
+            out << "\"terminalCapIds\":[],";
+            out << "\"terminalCondition\":\"unresolved\"";
+            out << '}';
+        }
+    }
+    out << ']';
+}
+
+template <typename BlendBuilder>
+std::string makeBlendResultJson(OcctKernel* kernel,
+                                uint32_t shapeId,
+                                BlendBuilder& builder,
+                                const TopoDS_Shape& sourceShape,
+                                const std::vector<ResolvedEdgeRef>& edges,
+                                const std::vector<std::string>& normalizedParameters,
+                                const std::string& faceKind) {
+    std::ostringstream generatedFaces;
+    appendBlendFacesJson(generatedFaces, builder, sourceShape, edges, normalizedParameters, faceKind);
+
+    std::vector<std::string> deletedEdges;
+    for (const ResolvedEdgeRef& edge : edges) {
+        deletedEdges.push_back(edge.stableHash);
+    }
+
+    std::ostringstream result;
+    result << '{';
+    result << "\"shapeId\":" << shapeId << ',';
+    result << "\"revision\":" << kernel->getRevisionInfo(shapeId) << ',';
+    result << "\"topology\":" << kernel->getTopology(shapeId) << ',';
+    result << "\"lineage\":{";
+    result << "\"generated\":" << generatedFaces.str() << ',';
+    result << "\"modified\":[],";
+    result << "\"retained\":[],";
+    result << "\"deleted\":"; appendStringArrayJson(result, deletedEdges);
+    result << "},";
+    result << "\"blendFaces\":" << generatedFaces.str() << ',';
+    result << "\"status\":{";
+    result << "\"isPartial\":false,";
+    result << "\"isClipped\":false,";
+    result << "\"isHealed\":false,";
+    result << "\"isExact\":true";
+    result << "}";
+    result << '}';
+    return result.str();
 }
 
 std::vector<std::string> optionalStringArrayMember(const mini_json::Value& object, const std::string& key) {
@@ -1644,6 +2053,367 @@ uint32_t OcctKernel::chamferEdges(uint32_t id, double distance) {
     return 0;
 }
 
+std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& specJson) {
+    const std::string operation = "filletEdges";
+    try {
+        auto sourceIt = _impl->records.find(id);
+        if (sourceIt == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
+        const TopoDS_Shape& shape = sourceIt->second.shape;
+        const RevisionMetadata* sourceRevision = &sourceIt->second.revision;
+
+        const mini_json::Value root = mini_json::requireObject(mini_json::parse(specJson), "fillet spec");
+        requireSchemaVersion(root, operation);
+        const bool allowUnknownFields = optionalBoolMember(root, "allowUnknownFields", false);
+        rejectUnknownFields(root,
+                            { "schemaVersion", "allowUnknownFields", "unit", "edges", "radius", "radiusMode", "startRadius", "endRadius", "stations", "law", "tangentPropagation", "limits", "cornerMode", "blendShape", "continuity", "angularTolerance", "overflowMode", "metadata" },
+                            operation,
+                            "fillet",
+                            allowUnknownFields);
+
+        if (hasMember(root, "limits")) {
+            throwStructuredValidation(operation, "fillet.limits", "Partial-edge fillets are not exposed by this OCCT build", "fillet.partialEdge");
+        }
+        if (optionalStringMember(root, "cornerMode", "rollingBall") != "rollingBall") {
+            throwStructuredValidation(operation, "fillet.cornerMode", "Only rollingBall corner handling is supported by this OCCT build", "fillet.cornerModes");
+        }
+        if (optionalStringMember(root, "overflowMode", "fail") != "fail") {
+            throwStructuredValidation(operation, "fillet.overflowMode", "Only fail-fast overflow handling is supported", "fillet.overflowModes");
+        }
+        if (!optionalBoolMember(root, "tangentPropagation", true)) {
+            throwStructuredValidation(operation, "fillet.tangentPropagation", "Disabling tangent propagation is not exposed by this OCCT build", "fillet.nonPropagatingEdges");
+        }
+
+        BRepFilletAPI_MakeFillet mkFillet(shape, parseFilletShape(optionalStringMember(root, "blendShape", "rational"), operation, "fillet.blendShape"));
+        const std::string continuity = optionalStringMember(root, "continuity", "C1");
+        const double angularTolerance = optionalNumberMember(root, "angularTolerance", 1.0e-2);
+        if (!std::isfinite(angularTolerance) || angularTolerance <= 0.0) {
+            throwStructuredValidation(operation, "fillet.angularTolerance", "angularTolerance must be finite and > 0");
+        }
+        mkFillet.SetContinuity(parseContinuity(continuity, operation, "fillet.continuity"), angularTolerance);
+
+        std::vector<ResolvedEdgeRef> appliedEdges;
+        std::vector<std::string> normalizedParameters;
+        auto addFilletForEdge = [&](const mini_json::Value& entryValue, const std::string& path) {
+            const mini_json::Value& entry = mini_json::requireObject(entryValue, path);
+            rejectUnknownFields(entry,
+                                { "edge", "edgeRef", "topoId", "stableHash", "radius", "radiusMode", "startRadius", "endRadius", "stations", "law", "tangentPropagation", "limits", "cornerMode", "blendShape", "continuity", "angularTolerance", "overflowMode", "metadata" },
+                                operation,
+                                path,
+                                allowUnknownFields);
+            if (hasMember(entry, "limits")) {
+                throwStructuredValidation(operation, path + ".limits", "Partial-edge fillets are not exposed by this OCCT build", "fillet.partialEdge");
+            }
+            if (!optionalBoolMember(entry, "tangentPropagation", true)) {
+                throwStructuredValidation(operation, path + ".tangentPropagation", "Disabling tangent propagation is not exposed by this OCCT build", "fillet.nonPropagatingEdges");
+            }
+            if (optionalStringMember(entry, "cornerMode", optionalStringMember(root, "cornerMode", "rollingBall")) != "rollingBall") {
+                throwStructuredValidation(operation, path + ".cornerMode", "Only rollingBall corner handling is supported by this OCCT build", "fillet.cornerModes");
+            }
+
+            const mini_json::Value* edgeRefValue = entry.get("edge");
+            if (edgeRefValue == nullptr) edgeRefValue = entry.get("edgeRef");
+            const mini_json::Value& effectiveEdgeRef = edgeRefValue == nullptr ? entry : *edgeRefValue;
+            ResolvedEdgeRef edge = resolveEdgeRef(shape, sourceRevision, effectiveEdgeRef, operation, path + ".edge");
+
+            const mini_json::Value* lawValue = entry.get("law");
+            const mini_json::Value* stationValue = entry.get("stations");
+            if (lawValue == nullptr) lawValue = root.get("law");
+            if (stationValue == nullptr) stationValue = root.get("stations");
+            std::string mode = optionalStringMember(entry, "radiusMode");
+            if (mode.empty()) {
+                if (lawValue != nullptr) mode = "law";
+                else if (stationValue != nullptr || hasMember(entry, "startRadius") || hasMember(entry, "endRadius") || hasMember(root, "startRadius") || hasMember(root, "endRadius")) mode = "variable";
+                else mode = "constant";
+            }
+
+            std::ostringstream normalized;
+            normalized << "{";
+            normalized << "\"mode\":"; appendJsonString(normalized, mode); normalized << ",";
+
+            if (mode == "constant") {
+                const double radius = hasMember(entry, "radius")
+                    ? requirePositiveMember(entry, "radius", operation, path + ".radius")
+                    : requirePositiveMember(root, "radius", operation, "fillet.radius");
+                mkFillet.Add(radius, edge.edge);
+                normalized << "\"radius\":" << radius;
+            } else if (mode == "variable" || mode == "startEnd") {
+                if (stationValue != nullptr) {
+                    const mini_json::Value& stations = mini_json::requireArray(*stationValue, path + ".stations");
+                    if (stations.array.size() < 2) {
+                        throwStructuredValidation(operation, path + ".stations", "At least two radius stations are required");
+                    }
+                    TColgp_Array1OfPnt2d table(1, static_cast<Standard_Integer>(stations.array.size()));
+                    double previousT = -1.0;
+                    normalized << "\"stations\":[";
+                    for (std::size_t i = 0; i < stations.array.size(); ++i) {
+                        const mini_json::Value& station = mini_json::requireObject(stations.array[i], path + ".stations[]");
+                        const double t = optionalNumberMember(station, "t", optionalNumberMember(station, "u", -1.0));
+                        const double radius = requirePositiveMember(station, "radius", operation, path + ".stations[].radius");
+                        if (!std::isfinite(t) || t < 0.0 || t > 1.0 || t <= previousT) {
+                            throwStructuredValidation(operation, path + ".stations[].t", "Station t values must be finite, increasing, and in [0, 1]");
+                        }
+                        previousT = t;
+                        table.SetValue(static_cast<Standard_Integer>(i + 1), gp_Pnt2d(t, radius));
+                        if (i > 0) normalized << ',';
+                        normalized << "{\"t\":" << t << ",\"radius\":" << radius << "}";
+                    }
+                    normalized << "]";
+                    mkFillet.Add(table, edge.edge);
+                } else {
+                    const double startRadius = hasMember(entry, "startRadius")
+                        ? requirePositiveMember(entry, "startRadius", operation, path + ".startRadius")
+                        : requirePositiveMember(root, "startRadius", operation, "fillet.startRadius");
+                    const double endRadius = hasMember(entry, "endRadius")
+                        ? requirePositiveMember(entry, "endRadius", operation, path + ".endRadius")
+                        : requirePositiveMember(root, "endRadius", operation, "fillet.endRadius");
+                    mkFillet.Add(startRadius, endRadius, edge.edge);
+                    normalized << "\"startRadius\":" << startRadius << ",\"endRadius\":" << endRadius;
+                }
+            } else if (mode == "law") {
+                if (lawValue == nullptr) {
+                    throwStructuredValidation(operation, path + ".law", "law radiusMode requires a law object");
+                }
+                const mini_json::Value& law = mini_json::requireObject(*lawValue, path + ".law");
+                const std::string lawType = optionalStringMember(law, "type", "linear");
+                if (lawType == "constant") {
+                    const double radius = requirePositiveMember(law, "radius", operation, path + ".law.radius");
+                    mkFillet.Add(radius, edge.edge);
+                    normalized << "\"law\":{\"type\":\"constant\",\"radius\":" << radius << "}";
+                } else if (lawType == "linear") {
+                    const double startRadius = requirePositiveMember(law, "startRadius", operation, path + ".law.startRadius");
+                    const double endRadius = requirePositiveMember(law, "endRadius", operation, path + ".law.endRadius");
+                    mkFillet.Add(startRadius, endRadius, edge.edge);
+                    normalized << "\"law\":{\"type\":\"linear\",\"startRadius\":" << startRadius << ",\"endRadius\":" << endRadius << "}";
+                } else {
+                    throwStructuredValidation(operation, path + ".law.type", "Only constant and linear radius laws are supported", "fillet.radiusLawTypes");
+                }
+            } else {
+                throwStructuredValidation(operation, path + ".radiusMode", "Unsupported fillet radiusMode", "fillet.radiusModes");
+            }
+
+            normalized << ",\"tangentPropagation\":true}";
+            appliedEdges.push_back(edge);
+            normalizedParameters.push_back(normalized.str());
+        };
+
+        if (const mini_json::Value* edgesValue = root.get("edges")) {
+            const mini_json::Value& edges = mini_json::requireArray(*edgesValue, "fillet.edges");
+            if (edges.array.empty()) {
+                throwStructuredValidation(operation, "fillet.edges", "At least one edge selection is required");
+            }
+            for (std::size_t i = 0; i < edges.array.size(); ++i) {
+                addFilletForEdge(edges.array[i], "fillet.edges[" + std::to_string(i) + "]");
+            }
+        } else {
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+            if (edges.Extent() == 0) {
+                throwStructuredValidation(operation, "fillet.edges", "Shape has no edges to fillet");
+            }
+            for (int i = 1; i <= edges.Extent(); ++i) {
+                mini_json::Value entry;
+                entry.kind = mini_json::Value::Kind::Object;
+                mini_json::Value topo;
+                topo.kind = mini_json::Value::Kind::Number;
+                topo.number = static_cast<double>(i);
+                entry.object.push_back({ "topoId", topo });
+                addFilletForEdge(entry, "fillet.edges[" + std::to_string(i - 1) + "]");
+            }
+        }
+
+        mkFillet.Build();
+        if (!mkFillet.IsDone() || mkFillet.Shape().IsNull()) {
+            std::vector<std::string> failing;
+            for (const ResolvedEdgeRef& edge : appliedEdges) failing.push_back(stableEdgeRefString(edge));
+            throwStructuredOperationError(operation, "BRepFilletAPI_MakeFillet failed", failing);
+        }
+
+        const uint32_t resultId = storeShapeWithMetadata(mkFillet.Shape(),
+                                                         "filletEdges",
+                                                         "source=" + sourceRevision->revisionId + ";spec=" + fnv1a64(objectToStableSignature(root)),
+                                                         { sourceRevision->revisionId },
+                                                         "unresolved",
+                                                         "unresolved",
+                                                         { "Fillet generated/modified/deleted lineage is reported from OCCT history when available; unresolved entries are explicit in the result payload" });
+        auto resultIt = _impl->records.find(resultId);
+        if (resultIt != _impl->records.end()) {
+            for (const ResolvedEdgeRef& edge : appliedEdges) {
+                resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "unresolved" });
+            }
+        }
+        return makeBlendResultJson(this, resultId, mkFillet, shape, appliedEdges, normalizedParameters, "filletFace");
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwStructuredOperationError(operation, sf.GetMessageString());
+    }
+    return "{}";
+}
+
+std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& specJson) {
+    const std::string operation = "chamferEdges";
+    try {
+        auto sourceIt = _impl->records.find(id);
+        if (sourceIt == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
+        const TopoDS_Shape& shape = sourceIt->second.shape;
+        const RevisionMetadata* sourceRevision = &sourceIt->second.revision;
+
+        const mini_json::Value root = mini_json::requireObject(mini_json::parse(specJson), "chamfer spec");
+        requireSchemaVersion(root, operation);
+        const bool allowUnknownFields = optionalBoolMember(root, "allowUnknownFields", false);
+        rejectUnknownFields(root,
+                            { "schemaVersion", "allowUnknownFields", "unit", "edges", "mode", "distance", "distance1", "distance2", "angleRadians", "angleDegrees", "referenceFace", "tangentPropagation", "limits", "cornerMode", "overflowMode", "metadata" },
+                            operation,
+                            "chamfer",
+                            allowUnknownFields);
+        if (hasMember(root, "limits")) {
+            throwStructuredValidation(operation, "chamfer.limits", "Partial-edge chamfers are not exposed by this OCCT build", "chamfer.partialEdge");
+        }
+        if (!optionalBoolMember(root, "tangentPropagation", true)) {
+            throwStructuredValidation(operation, "chamfer.tangentPropagation", "Disabling tangent propagation is not exposed by this OCCT build", "chamfer.nonPropagatingEdges");
+        }
+        if (optionalStringMember(root, "cornerMode", "rollingBall") != "rollingBall") {
+            throwStructuredValidation(operation, "chamfer.cornerMode", "Only rollingBall corner handling is supported by this OCCT build", "chamfer.cornerModes");
+        }
+        if (optionalStringMember(root, "overflowMode", "fail") != "fail") {
+            throwStructuredValidation(operation, "chamfer.overflowMode", "Only fail-fast overflow handling is supported", "chamfer.overflowModes");
+        }
+
+        BRepFilletAPI_MakeChamfer mkChamfer(shape);
+        std::vector<ResolvedEdgeRef> appliedEdges;
+        std::vector<std::string> normalizedParameters;
+
+        auto addChamferForEdge = [&](const mini_json::Value& entryValue, const std::string& path) {
+            const mini_json::Value& entry = mini_json::requireObject(entryValue, path);
+            rejectUnknownFields(entry,
+                                { "edge", "edgeRef", "topoId", "stableHash", "mode", "distance", "distance1", "distance2", "angleRadians", "angleDegrees", "referenceFace", "tangentPropagation", "limits", "cornerMode", "overflowMode", "metadata" },
+                                operation,
+                                path,
+                                allowUnknownFields);
+            if (hasMember(entry, "limits")) {
+                throwStructuredValidation(operation, path + ".limits", "Partial-edge chamfers are not exposed by this OCCT build", "chamfer.partialEdge");
+            }
+            if (!optionalBoolMember(entry, "tangentPropagation", true)) {
+                throwStructuredValidation(operation, path + ".tangentPropagation", "Disabling tangent propagation is not exposed by this OCCT build", "chamfer.nonPropagatingEdges");
+            }
+            if (optionalStringMember(entry, "cornerMode", optionalStringMember(root, "cornerMode", "rollingBall")) != "rollingBall") {
+                throwStructuredValidation(operation, path + ".cornerMode", "Only rollingBall corner handling is supported by this OCCT build", "chamfer.cornerModes");
+            }
+
+            const mini_json::Value* edgeRefValue = entry.get("edge");
+            if (edgeRefValue == nullptr) edgeRefValue = entry.get("edgeRef");
+            const mini_json::Value& effectiveEdgeRef = edgeRefValue == nullptr ? entry : *edgeRefValue;
+            ResolvedEdgeRef edge = resolveEdgeRef(shape, sourceRevision, effectiveEdgeRef, operation, path + ".edge");
+            const std::string mode = optionalStringMember(entry, "mode", optionalStringMember(root, "mode", "symmetric"));
+
+            std::ostringstream normalized;
+            normalized << "{";
+            normalized << "\"mode\":"; appendJsonString(normalized, mode); normalized << ",";
+
+            if (mode == "symmetric") {
+                const double distance = hasMember(entry, "distance")
+                    ? requirePositiveMember(entry, "distance", operation, path + ".distance")
+                    : requirePositiveMember(root, "distance", operation, "chamfer.distance");
+                mkChamfer.Add(distance, edge.edge);
+                normalized << "\"distance\":" << distance;
+            } else if (mode == "twoDistance") {
+                const double distance1 = hasMember(entry, "distance1")
+                    ? requirePositiveMember(entry, "distance1", operation, path + ".distance1")
+                    : requirePositiveMember(root, "distance1", operation, "chamfer.distance1");
+                const double distance2 = hasMember(entry, "distance2")
+                    ? requirePositiveMember(entry, "distance2", operation, path + ".distance2")
+                    : requirePositiveMember(root, "distance2", operation, "chamfer.distance2");
+                const mini_json::Value* referenceFaceValue = entry.get("referenceFace");
+                if (referenceFaceValue == nullptr) referenceFaceValue = root.get("referenceFace");
+                if (referenceFaceValue == nullptr) {
+                    throwStructuredValidation(operation, path + ".referenceFace", "twoDistance chamfers require a referenceFace for the distance1 side");
+                }
+                ResolvedFaceRef referenceFace = resolveFaceRef(shape, sourceRevision, *referenceFaceValue, operation, path + ".referenceFace");
+                mkChamfer.Add(distance1, distance2, edge.edge, referenceFace.face);
+                normalized << "\"distance1\":" << distance1 << ",\"distance2\":" << distance2 << ",\"referenceFace\":";
+                appendEntityRefJson(normalized, referenceFace);
+            } else if (mode == "distanceAngle") {
+                const double distance = hasMember(entry, "distance")
+                    ? requirePositiveMember(entry, "distance", operation, path + ".distance")
+                    : requirePositiveMember(root, "distance", operation, "chamfer.distance");
+                const mini_json::Value* angleSource = (hasMember(entry, "angleRadians") || hasMember(entry, "angleDegrees")) ? &entry : &root;
+                const double angle = optionalAngleRadians(*angleSource, operation, angleSource == &entry ? path : "chamfer");
+                const mini_json::Value* referenceFaceValue = entry.get("referenceFace");
+                if (referenceFaceValue == nullptr) referenceFaceValue = root.get("referenceFace");
+                if (referenceFaceValue == nullptr) {
+                    throwStructuredValidation(operation, path + ".referenceFace", "distanceAngle chamfers require a referenceFace for the measured side");
+                }
+                ResolvedFaceRef referenceFace = resolveFaceRef(shape, sourceRevision, *referenceFaceValue, operation, path + ".referenceFace");
+                mkChamfer.AddDA(distance, angle, edge.edge, referenceFace.face);
+                normalized << "\"distance\":" << distance << ",\"angleRadians\":" << angle << ",\"referenceFace\":";
+                appendEntityRefJson(normalized, referenceFace);
+            } else {
+                throwStructuredValidation(operation, path + ".mode", "Unsupported chamfer mode", "chamfer.modes");
+            }
+
+            normalized << ",\"tangentPropagation\":true}";
+            appliedEdges.push_back(edge);
+            normalizedParameters.push_back(normalized.str());
+        };
+
+        if (const mini_json::Value* edgesValue = root.get("edges")) {
+            const mini_json::Value& edges = mini_json::requireArray(*edgesValue, "chamfer.edges");
+            if (edges.array.empty()) {
+                throwStructuredValidation(operation, "chamfer.edges", "At least one edge selection is required");
+            }
+            for (std::size_t i = 0; i < edges.array.size(); ++i) {
+                addChamferForEdge(edges.array[i], "chamfer.edges[" + std::to_string(i) + "]");
+            }
+        } else {
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+            if (edges.Extent() == 0) {
+                throwStructuredValidation(operation, "chamfer.edges", "Shape has no edges to chamfer");
+            }
+            for (int i = 1; i <= edges.Extent(); ++i) {
+                mini_json::Value entry;
+                entry.kind = mini_json::Value::Kind::Object;
+                mini_json::Value topo;
+                topo.kind = mini_json::Value::Kind::Number;
+                topo.number = static_cast<double>(i);
+                entry.object.push_back({ "topoId", topo });
+                addChamferForEdge(entry, "chamfer.edges[" + std::to_string(i - 1) + "]");
+            }
+        }
+
+        mkChamfer.Build();
+        if (!mkChamfer.IsDone() || mkChamfer.Shape().IsNull()) {
+            std::vector<std::string> failing;
+            for (const ResolvedEdgeRef& edge : appliedEdges) failing.push_back(stableEdgeRefString(edge));
+            throwStructuredOperationError(operation, "BRepFilletAPI_MakeChamfer failed", failing);
+        }
+
+        const uint32_t resultId = storeShapeWithMetadata(mkChamfer.Shape(),
+                                                         "chamferEdges",
+                                                         "source=" + sourceRevision->revisionId + ";spec=" + fnv1a64(objectToStableSignature(root)),
+                                                         { sourceRevision->revisionId },
+                                                         "unresolved",
+                                                         "unresolved",
+                                                         { "Chamfer generated/modified/deleted lineage is reported from OCCT history when available; unresolved entries are explicit in the result payload" });
+        auto resultIt = _impl->records.find(resultId);
+        if (resultIt != _impl->records.end()) {
+            for (const ResolvedEdgeRef& edge : appliedEdges) {
+                resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "unresolved" });
+            }
+        }
+        return makeBlendResultJson(this, resultId, mkChamfer, shape, appliedEdges, normalizedParameters, "chamferFace");
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwStructuredOperationError(operation, sf.GetMessageString());
+    }
+    return "{}";
+}
+
 uint32_t OcctKernel::transformShape(uint32_t id, const std::string& transformJson) {
     try {
         const ShapeTransformOptions options = parseShapeTransformOptions(transformJson);
@@ -1996,6 +2766,257 @@ std::string OcctKernel::mapEntitiesAcrossRevisions(const std::string& fromRevisi
     return "{}";
 }
 
+std::string OcctKernel::evaluateEdge(uint32_t id, const std::string& edgeRefJson, double t) {
+    const std::string operation = "evaluateEdge";
+    try {
+        auto it = _impl->records.find(id);
+        if (it == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
+        const mini_json::Value edgeRef = mini_json::requireObject(mini_json::parse(edgeRefJson), "edgeRef");
+        ResolvedEdgeRef edge = resolveEdgeRef(it->second.shape, &it->second.revision, edgeRef, operation, "edgeRef");
+        BRepAdaptor_Curve curve(edge.edge);
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        const bool nativeParameter = optionalStringMember(edgeRef, "parameterMode", "normalized") == "native" || !optionalBoolMember(edgeRef, "normalized", true);
+        const double parameter = nativeParameter ? t : first + (last - first) * t;
+        if (!std::isfinite(parameter) || parameter < std::min(first, last) - 1.0e-12 || parameter > std::max(first, last) + 1.0e-12) {
+            throwStructuredValidation(operation, "t", "Edge parameter is outside the curve domain");
+        }
+
+        gp_Pnt point;
+        gp_Vec tangent;
+        curve.D1(parameter, point, tangent);
+        const bool hasTangent = tangent.SquareMagnitude() > 1.0e-18;
+        if (hasTangent) tangent.Normalize();
+
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"edge\":"; appendEntityRefJson(ss, edge); ss << ",";
+        ss << "\"curveType\":"; appendJsonString(ss, curveTypeName(curve.GetType())); ss << ",";
+        ss << "\"parameter\":" << parameter << ",";
+        ss << "\"normalizedParameter\":" << ((parameter - first) / (last - first)) << ",";
+        ss << "\"domain\":{\"first\":" << first << ",\"last\":" << last << "},";
+        ss << "\"point\":"; appendPointJson(ss, point); ss << ",";
+        ss << "\"tangent\":";
+        if (hasTangent) appendVectorJson(ss, tangent); else ss << "null";
+        ss << "}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+    }
+    return "{}";
+}
+
+std::string OcctKernel::sampleEdge(uint32_t id, const std::string& edgeRefJson, const std::string& optionsJson) {
+    const std::string operation = "sampleEdge";
+    try {
+        auto it = _impl->records.find(id);
+        if (it == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
+        const mini_json::Value edgeRef = mini_json::requireObject(mini_json::parse(edgeRefJson), "edgeRef");
+        const mini_json::Value options = optionsJson.empty()
+            ? mini_json::Value::makeObject()
+            : mini_json::requireObject(mini_json::parse(optionsJson), "sampleEdge options");
+        const int count = optionalIntMember(options, "count", 16);
+        if (count < 2 || count > 4096) {
+            throwStructuredValidation(operation, "options.count", "sample count must be in [2, 4096]");
+        }
+        const bool includeTangents = optionalBoolMember(options, "includeTangents", true);
+        const bool normalized = optionalBoolMember(options, "normalized", true);
+        const double start = optionalNumberMember(options, "start", normalized ? 0.0 : std::numeric_limits<double>::quiet_NaN());
+        const double end = optionalNumberMember(options, "end", normalized ? 1.0 : std::numeric_limits<double>::quiet_NaN());
+
+        ResolvedEdgeRef edge = resolveEdgeRef(it->second.shape, &it->second.revision, edgeRef, operation, "edgeRef");
+        BRepAdaptor_Curve curve(edge.edge);
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        const double parameterStart = normalized ? first + (last - first) * start : (std::isnan(start) ? first : start);
+        const double parameterEnd = normalized ? first + (last - first) * end : (std::isnan(end) ? last : end);
+        if (!std::isfinite(parameterStart) || !std::isfinite(parameterEnd) || parameterStart == parameterEnd) {
+            throwStructuredValidation(operation, "options", "sample range must be finite and non-empty");
+        }
+
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"edge\":"; appendEntityRefJson(ss, edge); ss << ",";
+        ss << "\"curveType\":"; appendJsonString(ss, curveTypeName(curve.GetType())); ss << ",";
+        ss << "\"domain\":{\"first\":" << first << ",\"last\":" << last << "},";
+        ss << "\"samples\":[";
+        for (int i = 0; i < count; ++i) {
+            if (i > 0) ss << ',';
+            const double alpha = static_cast<double>(i) / static_cast<double>(count - 1);
+            const double parameter = parameterStart + (parameterEnd - parameterStart) * alpha;
+            gp_Pnt point;
+            gp_Vec tangent;
+            curve.D1(parameter, point, tangent);
+            const bool hasTangent = tangent.SquareMagnitude() > 1.0e-18;
+            if (hasTangent) tangent.Normalize();
+            ss << "{";
+            ss << "\"parameter\":" << parameter << ",";
+            ss << "\"normalizedParameter\":" << ((parameter - first) / (last - first)) << ",";
+            ss << "\"point\":"; appendPointJson(ss, point);
+            if (includeTangents) {
+                ss << ",\"tangent\":";
+                if (hasTangent) appendVectorJson(ss, tangent); else ss << "null";
+            }
+            ss << "}";
+        }
+        ss << "]}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+    }
+    return "{}";
+}
+
+std::string OcctKernel::getEdgeCurve(uint32_t id, const std::string& edgeRefJson) {
+    const std::string operation = "getEdgeCurve";
+    try {
+        auto it = _impl->records.find(id);
+        if (it == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
+        const mini_json::Value edgeRef = mini_json::requireObject(mini_json::parse(edgeRefJson), "edgeRef");
+        ResolvedEdgeRef edge = resolveEdgeRef(it->second.shape, &it->second.revision, edgeRef, operation, "edgeRef");
+        BRepAdaptor_Curve curve(edge.edge);
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"edge\":"; appendEntityRefJson(ss, edge); ss << ",";
+        ss << "\"curveType\":"; appendJsonString(ss, curveTypeName(curve.GetType())); ss << ",";
+        ss << "\"domain\":{\"first\":" << first << ",\"last\":" << last << "},";
+        ss << "\"startPoint\":"; appendPointJson(ss, curve.Value(first)); ss << ",";
+        ss << "\"endPoint\":"; appendPointJson(ss, curve.Value(last));
+
+        if (curve.GetType() == GeomAbs_Line) {
+            const gp_Lin line = curve.Line();
+            ss << ",\"line\":{\"origin\":"; appendPointJson(ss, line.Location()); ss << ",\"direction\":"; appendVectorJson(ss, gp_Vec(line.Direction())); ss << "}";
+        } else if (curve.GetType() == GeomAbs_Circle) {
+            const gp_Circ circle = curve.Circle();
+            ss << ",\"circle\":{\"center\":"; appendPointJson(ss, circle.Location()); ss << ",\"radius\":" << circle.Radius() << ",\"normal\":"; appendVectorJson(ss, gp_Vec(circle.Axis().Direction())); ss << "}";
+        } else if (curve.GetType() == GeomAbs_BSplineCurve) {
+            Handle(Geom_BSplineCurve) bspline = curve.BSpline();
+            ss << ",\"bspline\":{\"degree\":" << bspline->Degree() << ",\"periodic\":" << (bspline->IsPeriodic() ? "true" : "false") << ",\"poles\":[";
+            for (int i = 1; i <= bspline->NbPoles(); ++i) {
+                if (i > 1) ss << ',';
+                appendPointJson(ss, bspline->Pole(i));
+            }
+            ss << "],\"weights\":[";
+            for (int i = 1; i <= bspline->NbPoles(); ++i) {
+                if (i > 1) ss << ',';
+                ss << bspline->Weight(i);
+            }
+            ss << "],\"knots\":[";
+            for (int i = 1; i <= bspline->NbKnots(); ++i) {
+                if (i > 1) ss << ',';
+                ss << bspline->Knot(i);
+            }
+            ss << "],\"multiplicities\":[";
+            for (int i = 1; i <= bspline->NbKnots(); ++i) {
+                if (i > 1) ss << ',';
+                ss << bspline->Multiplicity(i);
+            }
+            ss << "]}";
+        } else if (curve.GetType() == GeomAbs_BezierCurve) {
+            Handle(Geom_BezierCurve) bezier = curve.Bezier();
+            ss << ",\"bezier\":{\"degree\":" << bezier->Degree() << ",\"poles\":[";
+            for (int i = 1; i <= bezier->NbPoles(); ++i) {
+                if (i > 1) ss << ',';
+                appendPointJson(ss, bezier->Pole(i));
+            }
+            ss << "],\"weights\":[";
+            for (int i = 1; i <= bezier->NbPoles(); ++i) {
+                if (i > 1) ss << ',';
+                ss << bezier->Weight(i);
+            }
+            ss << "]}";
+        }
+
+        ss << "}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+    }
+    return "{}";
+}
+
+std::string OcctKernel::evaluateFace(uint32_t id, const std::string& faceRefJson, double u, double v) {
+    const std::string operation = "evaluateFace";
+    try {
+        auto it = _impl->records.find(id);
+        if (it == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
+        const mini_json::Value faceRef = mini_json::requireObject(mini_json::parse(faceRefJson), "faceRef");
+        ResolvedFaceRef face = resolveFaceRef(it->second.shape, &it->second.revision, faceRef, operation, "faceRef");
+        BRepAdaptor_Surface surface(face.face, Standard_False);
+        const double firstU = surface.FirstUParameter();
+        const double lastU = surface.LastUParameter();
+        const double firstV = surface.FirstVParameter();
+        const double lastV = surface.LastVParameter();
+        const bool nativeParameter = optionalStringMember(faceRef, "parameterMode", "normalized") == "native" || !optionalBoolMember(faceRef, "normalized", true);
+        const double parameterU = nativeParameter ? u : firstU + (lastU - firstU) * u;
+        const double parameterV = nativeParameter ? v : firstV + (lastV - firstV) * v;
+        if (!std::isfinite(parameterU) || !std::isfinite(parameterV)) {
+            throwStructuredValidation(operation, "uv", "Face parameters must be finite");
+        }
+
+        gp_Pnt point;
+        gp_Vec du;
+        gp_Vec dv;
+        surface.D1(parameterU, parameterV, point, du, dv);
+        gp_Vec normal = du.Crossed(dv);
+        const bool hasNormal = normal.SquareMagnitude() > 1.0e-18;
+        if (hasNormal) {
+            if (face.face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+            normal.Normalize();
+        }
+
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"face\":"; appendEntityRefJson(ss, face); ss << ",";
+        ss << "\"surfaceType\":"; appendJsonString(ss, surfaceTypeName(surface.GetType())); ss << ",";
+        ss << "\"uv\":[" << parameterU << ',' << parameterV << "],";
+        ss << "\"normalizedUv\":[" << ((parameterU - firstU) / (lastU - firstU)) << ',' << ((parameterV - firstV) / (lastV - firstV)) << "],";
+        ss << "\"domain\":{\"u\":[" << firstU << ',' << lastU << "],\"v\":[" << firstV << ',' << lastV << "]},";
+        ss << "\"point\":"; appendPointJson(ss, point); ss << ",";
+        ss << "\"dU\":"; appendVectorJson(ss, du); ss << ",";
+        ss << "\"dV\":"; appendVectorJson(ss, dv); ss << ",";
+        ss << "\"normal\":";
+        if (hasNormal) appendVectorJson(ss, normal); else ss << "null";
+        ss << "}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.GetMessageString());
+    }
+    return "{}";
+}
+
+std::string OcctKernel::getOperationSchema() const {
+    return "{"
+        "\"schemaVersion\":1,"
+        "\"operations\":{"
+        "\"filletEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"constantRadius\":true,\"startEndRadius\":true,\"stationRadii\":true,\"lawRadius\":[\"constant\",\"linear\"],\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"blendShape\":[\"rational\",\"quasiAngular\",\"polynomial\"],\"continuity\":[\"C0\",\"C1\",\"C2\"],\"overflowModes\":[\"fail\"]}},"
+        "\"chamferEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"symmetric\":true,\"twoDistance\":true,\"distanceAngle\":true,\"referenceFace\":true,\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"overflowModes\":[\"fail\"]}},"
+        "\"evaluateEdge\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
+        "\"sampleEdge\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
+        "\"getEdgeCurve\":{\"schemaVersion\":1,\"nativeExact\":true},"
+        "\"evaluateFace\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]}"
+        "}"
+        "}";
+}
+
 std::string OcctKernel::getCapabilities() const {
     return "{"
         "\"featureEdgesV1\":true,"
@@ -2010,7 +3031,46 @@ std::string OcctKernel::getCapabilities() const {
         "\"revisionRetentionV1\":true,"
         "\"historyV1\":true,"
         "\"stableNamingV1\":false,"
-        "\"checkpointV1\":true"
+        "\"checkpointV1\":true,"
+        "\"operations\":{"
+        "\"structuredSpecsV1\":true,"
+        "\"operationSchemaV1\":true,"
+        "\"nativeExactBlendOpsV1\":true,"
+        "\"exactSubshapeEvaluationV1\":true"
+        "},"
+        "\"fillet\":{"
+        "\"schemaVersion\":1,"
+        "\"nativeExact\":true,"
+        "\"constantRadius\":true,"
+        "\"startEndRadius\":true,"
+        "\"stationRadii\":true,"
+        "\"lawRadius\":[\"constant\",\"linear\"],"
+        "\"tangentPropagation\":true,"
+        "\"partialEdges\":false,"
+        "\"setbackCorners\":false,"
+        "\"blendShape\":[\"rational\",\"quasiAngular\",\"polynomial\"],"
+        "\"continuity\":[\"C0\",\"C1\",\"C2\"],"
+        "\"overflowModes\":[\"fail\"]"
+        "},"
+        "\"chamfer\":{"
+        "\"schemaVersion\":1,"
+        "\"nativeExact\":true,"
+        "\"symmetric\":true,"
+        "\"twoDistance\":true,"
+        "\"distanceAngle\":true,"
+        "\"referenceFace\":true,"
+        "\"tangentPropagation\":true,"
+        "\"partialEdges\":false,"
+        "\"setbackCorners\":false,"
+        "\"overflowModes\":[\"fail\"]"
+        "},"
+        "\"subshapeEvaluation\":{"
+        "\"evaluateEdge\":true,"
+        "\"sampleEdge\":true,"
+        "\"getEdgeCurve\":true,"
+        "\"evaluateFace\":true,"
+        "\"parameterModes\":[\"normalized\",\"native\"]"
+        "}"
         "}";
 }
 

@@ -424,6 +424,95 @@ describe('chamferEdges', () => {
     });
 });
 
+describe('structured blend operations', () => {
+    it('returns exact fillet lineage and a resident shape handle', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const result = k.filletEdgesWithSpec({
+            shape: box,
+            spec: {
+                schemaVersion: 1,
+                edges: [{ topoId: 1, radius: 1.25 }],
+                blendShape: 'rational',
+                continuity: 'C1',
+            },
+        });
+
+        expect(result.shape.id).toBe(result.shapeId);
+        expect(result.shape.id).not.toBe(box.id);
+        expect(result.status.isExact).toBe(true);
+        expect(result.blendFaces[0]).toMatchObject({ kind: 'filletFace' });
+        expect(result.topology.revisionId).toBe(result.revision.revisionId);
+    });
+
+    it('returns exact chamfer lineage with reference-face parameters', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const result = k.chamferEdgesWithSpec({
+            shape: box,
+            spec: {
+                schemaVersion: 1,
+                mode: 'twoDistance',
+                edges: [{ topoId: 1, distance1: 0.5, distance2: 1.0, referenceFace: { topoId: 1 } }],
+            },
+        });
+
+        expect(result.shape.id).toBeGreaterThan(0);
+        expect(result.blendFaces[0]).toMatchObject({ kind: 'chamferFace' });
+        expect(result.lineage.deleted[0]).toMatch(/^E:/);
+    });
+
+    it('throws a structured unsupported error for partial-edge fillets', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        try {
+            k.filletEdgesWithSpec({
+                shape: box,
+                spec: {
+                    schemaVersion: 1,
+                    edges: [{ topoId: 1, radius: 1, limits: { start: 0.2, end: 0.8 } }],
+                },
+            });
+            fail('should have thrown');
+        } catch (err) {
+            expect(err).toBeInstanceOf(KernelError);
+            expect((err as KernelError).code).toBe('INVALID_PARAMS');
+            expect(JSON.parse((err as KernelError).detail)).toMatchObject({
+                operation: 'filletEdges',
+                unsupportedFeature: 'fillet.partialEdge',
+            });
+        }
+    });
+});
+
+describe('exact subshape evaluation APIs', () => {
+    it('evaluates, samples, and describes an edge without tessellation', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        const evaluated = k.evaluateEdge({ shape: box, edge: { topoId: 1 }, t: 0.5 });
+        const samples = k.sampleEdge({ shape: box, edge: { topoId: 1 }, count: 3 });
+        const curve = k.getEdgeCurve({ shape: box, edge: { topoId: 1 } });
+
+        expect(evaluated.point).toEqual([0.5, 0, 0]);
+        expect(samples.samples).toHaveLength(3);
+        expect(curve.curveType).toBe('line');
+        expect(curve.line?.direction).toEqual([1, 0, 0]);
+    });
+
+    it('evaluates a face point and normal without tessellation', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        const evaluated = k.evaluateFace({ shape: box, face: { topoId: 1 }, u: 0.25, v: 0.75 });
+
+        expect(evaluated.surfaceType).toBe('plane');
+        expect(evaluated.point).toEqual([0.25, 0.75, 0]);
+        expect(evaluated.normal).toEqual([0, 0, 1]);
+    });
+});
+
 // ---------------------------------------------------------------------------
 // getTopology / checkValidity
 // ---------------------------------------------------------------------------
@@ -481,6 +570,20 @@ describe('getCapabilities', () => {
         expect(capabilities.historyV1).toBe(true);
         expect(capabilities.stableNamingV1).toBe(false);
         expect(capabilities.checkpointV1).toBe(true);
+        expect(capabilities.operations?.nativeExactBlendOpsV1).toBe(true);
+        expect(capabilities.fillet?.stationRadii).toBe(true);
+        expect(capabilities.fillet?.partialEdges).toBe(false);
+        expect(capabilities.chamfer?.distanceAngle).toBe(true);
+        expect(capabilities.subshapeEvaluation?.evaluateEdge).toBe(true);
+    });
+
+    it('returns a versioned operation schema', () => {
+        const k = makeKernel();
+        const schema = k.getOperationSchema();
+
+        expect(schema.schemaVersion).toBe(1);
+        expect(schema.operations.filletEdges).toBeDefined();
+        expect(schema.operations.evaluateFace).toBeDefined();
     });
 });
 

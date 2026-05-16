@@ -87,6 +87,12 @@ public:
     /// Chamfer all edges of the shape with a constant distance.
     uint32_t chamferEdges(uint32_t id, double distance);
 
+    /// Apply a versioned structured fillet spec and return blend lineage JSON.
+    std::string filletEdgesWithSpec(uint32_t id, const std::string& specJson);
+
+    /// Apply a versioned structured chamfer spec and return blend lineage JSON.
+    std::string chamferEdgesWithSpec(uint32_t id, const std::string& specJson);
+
     /// Apply a world-space transform to an existing resident shape.
     uint32_t transformShape(uint32_t id, const std::string& transformJson);
 
@@ -110,6 +116,21 @@ public:
     std::string mapEntitiesAcrossRevisions(const std::string& fromRevisionId,
                                            const std::string& toRevisionId,
                                            const std::string& stableHashesJson);
+
+    /// Evaluate an exact edge at a normalized or native curve parameter.
+    std::string evaluateEdge(uint32_t id, const std::string& edgeRefJson, double t);
+
+    /// Sample an exact edge using a JSON options object.
+    std::string sampleEdge(uint32_t id, const std::string& edgeRefJson, const std::string& optionsJson);
+
+    /// Return exact curve metadata for an edge reference.
+    std::string getEdgeCurve(uint32_t id, const std::string& edgeRefJson);
+
+    /// Evaluate an exact face at a normalized or native UV parameter.
+    std::string evaluateFace(uint32_t id, const std::string& faceRefJson, double u, double v);
+
+    /// Return the native operation schema/capability contract.
+    std::string getOperationSchema() const;
 
     /// Return capability flags for additive API contracts exposed by this build.
     std::string getCapabilities() const;
