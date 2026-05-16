@@ -1,0 +1,5 @@
+# ninja log v6
+476	8050	8006247616423757	CMakeFiles/occt-kernel.dir/bindings/bindings.cpp.o	2ff62aa14565aa0b
+439	11584	8006247616016397	CMakeFiles/occt-kernel.dir/cpp/profile_builder.cpp.o	d6c0fcd696839855
+159	13999	8006247614098627	CMakeFiles/occt-kernel.dir/cpp/kernel.cpp.o	a25de263d3ccbc5e
+14004	66992	8006247751631425	C:/Users/HP/OneDrive/Documents/C++ Projects/occt-kernel-wasm/dist/occt-kernel.js	c9e72c15e05d61c3

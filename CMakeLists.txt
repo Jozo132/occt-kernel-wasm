@@ -10,12 +10,49 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(NOT CMAKE_CONFIGURATION_TYPES)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel Fast)
+endif()
+
 # ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
 
 option(OCCT_KERNEL_WASM   "Build the Emscripten WASM target"    OFF)
 option(OCCT_KERNEL_NATIVE "Build the native shared-library target" OFF)
+option(OCCT_KERNEL_USE_MINIMAL_OCCT_LINK "Use a narrower OCCT link set for kernel targets" ON)
+
+set(OCCT_KERNEL_REQUIRED_COMPONENTS
+    FoundationClasses
+    ModelingData
+    ModelingAlgorithms
+    DataExchange
+)
+
+set(OCCT_KERNEL_MINIMAL_OCCT_LIBRARIES
+    TKernel
+    TKMath
+    TKG2d
+    TKG3d
+    TKGeomBase
+    TKBRep
+    TKGeomAlgo
+    TKTopAlgo
+    TKPrim
+    TKBO
+    TKBool
+    TKHLR
+    TKFillet
+    TKOffset
+    TKFeat
+    TKShHealing
+    TKMesh
+    TKXMesh
+    TKDE
+    TKXSBase
+    TKDESTEP
+    TKService
+)
 
 # ---------------------------------------------------------------------------
 # OCCT dependency
@@ -31,23 +68,13 @@ if(DEFINED OCCT_ROOT)
 endif()
 
 find_package(OpenCASCADE QUIET
-    COMPONENTS
-        FoundationClasses
-        ModelingData
-        ModelingAlgorithms
-        DataExchange
-        Visualization
+    COMPONENTS ${OCCT_KERNEL_REQUIRED_COMPONENTS}
 )
 
 if(NOT OpenCASCADE_FOUND)
     # Try alternative package name used by some OCCT builds
     find_package(OCCT QUIET
-        COMPONENTS
-            FoundationClasses
-            ModelingData
-            ModelingAlgorithms
-            DataExchange
-            Visualization
+        COMPONENTS ${OCCT_KERNEL_REQUIRED_COMPONENTS}
     )
     if(OCCT_FOUND)
         set(OpenCASCADE_FOUND TRUE)
@@ -87,6 +114,12 @@ if(OCCT_KERNEL_WASM)
                             "Set -DCMAKE_TOOLCHAIN_FILE=<emscripten>/cmake/Modules/Platform/Emscripten.cmake")
     endif()
 
+    set(OCCT_KERNEL_LINK_LIBRARIES ${OpenCASCADE_LIBRARIES})
+    if(OCCT_KERNEL_USE_MINIMAL_OCCT_LINK AND DEFINED OCCT_ROOT)
+        set(OCCT_KERNEL_LINK_LIBRARIES ${OCCT_KERNEL_MINIMAL_OCCT_LIBRARIES})
+        message(STATUS "Using minimal OCCT link set for occt-kernel WASM target")
+    endif()
+
     add_executable(occt-kernel ${KERNEL_SOURCES} ${BINDING_SOURCES})
 
     target_include_directories(occt-kernel
@@ -96,7 +129,7 @@ if(OCCT_KERNEL_WASM)
     )
 
     target_link_libraries(occt-kernel
-        PRIVATE ${OpenCASCADE_LIBRARIES}
+        PRIVATE ${OCCT_KERNEL_LINK_LIBRARIES}
     )
 
     # Ensure the linker can find OCCT static libraries by path
@@ -126,6 +159,9 @@ if(OCCT_KERNEL_WASM)
         "-sEXPORTED_RUNTIME_METHODS=[ccall,cwrap,FS]"
         # Production: strip assertions
         "$<$<CONFIG:Release>:-sASSERTIONS=0>"
+        # Fast local iteration: keep native semantics, skip expensive optimization work
+        "$<$<CONFIG:Fast>:-O0>"
+        "$<$<CONFIG:Fast>:-sASSERTIONS=0>"
         # Debug: keep assertions and source maps
         "$<$<CONFIG:Debug>:-sASSERTIONS=2>"
         "$<$<CONFIG:Debug>:-gsource-map>"
@@ -139,6 +175,7 @@ if(OCCT_KERNEL_WASM)
     target_compile_options(occt-kernel
         PRIVATE
             "$<$<CONFIG:Release>:-O3>"
+            "$<$<CONFIG:Fast>:-O0>"
             "$<$<CONFIG:Debug>:-O0;-g>"
     )
 

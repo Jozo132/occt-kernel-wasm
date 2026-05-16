@@ -9,7 +9,7 @@
 #   - cmake >= 3.20
 #
 # Usage:
-#   bash scripts/build-wasm.sh [release|debug]
+#   bash scripts/build-wasm.sh [release|debug|fast] [--reconfigure]
 #
 # Output:
 #   dist/occt-kernel.js
@@ -17,17 +17,52 @@
 # =============================================================================
 set -euo pipefail
 
+SECONDS=0
+
+format_elapsed() {
+    local total_seconds="$1"
+    local hours=$(( total_seconds / 3600 ))
+    local minutes=$(( (total_seconds % 3600) / 60 ))
+    local seconds=$(( total_seconds % 60 ))
+
+    if [ "${hours}" -gt 0 ]; then
+        printf '%sh %sm %ss' "${hours}" "${minutes}" "${seconds}"
+    elif [ "${minutes}" -gt 0 ]; then
+        printf '%sm %ss' "${minutes}" "${seconds}"
+    else
+        printf '%ss' "${seconds}"
+    fi
+}
+
+print_elapsed_time() {
+    echo "[build-wasm] Finished in $(format_elapsed "${SECONDS}")"
+}
+
+trap print_elapsed_time EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
-BUILD_TYPE="${1:-release}"
+BUILD_TYPE="release"
+RECONFIGURE=0
+
+for arg in "$@"; do
+    case "${arg}" in
+        release|Release) BUILD_TYPE="release" ;;
+        debug|Debug)     BUILD_TYPE="debug" ;;
+        fast|Fast)       BUILD_TYPE="fast" ;;
+        --reconfigure)   RECONFIGURE=1 ;;
+        *)
+            echo "Usage: $0 [release|debug|fast] [--reconfigure]"
+            exit 1
+            ;;
+    esac
+done
+
 case "${BUILD_TYPE}" in
-    release|Release) CMAKE_BUILD_TYPE="Release" ;;
-    debug|Debug)     CMAKE_BUILD_TYPE="Debug"   ;;
-    *)
-        echo "Usage: $0 [release|debug]"
-        exit 1
-        ;;
+    release) CMAKE_BUILD_TYPE="Release" ;;
+    debug)   CMAKE_BUILD_TYPE="Debug" ;;
+    fast)    CMAKE_BUILD_TYPE="Fast" ;;
 esac
 
 OCCT_INSTALL_DIR="${REPO_ROOT}/third-party/occt-wasm"
@@ -52,15 +87,19 @@ if [ -z "${EMSCRIPTEN_TOOLCHAIN}" ] || [ ! -f "${EMSCRIPTEN_TOOLCHAIN}" ]; then
     exit 1
 fi
 
-echo "[build-wasm] Configuring (${CMAKE_BUILD_TYPE})..."
 mkdir -p "${WASM_BUILD_DIR}"
 
-emcmake cmake -S "${REPO_ROOT}" -B "${WASM_BUILD_DIR}" \
-    -DCMAKE_TOOLCHAIN_FILE="${EMSCRIPTEN_TOOLCHAIN}" \
-    -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
-    -DOCCT_KERNEL_WASM=ON \
-    -DOCCT_ROOT="${OCCT_INSTALL_DIR}" \
-    -G "Unix Makefiles"
+if [ ! -f "${WASM_BUILD_DIR}/CMakeCache.txt" ] || [ "${RECONFIGURE}" -eq 1 ]; then
+    echo "[build-wasm] Configuring (${CMAKE_BUILD_TYPE})..."
+    emcmake cmake -S "${REPO_ROOT}" -B "${WASM_BUILD_DIR}" \
+        -DCMAKE_TOOLCHAIN_FILE="${EMSCRIPTEN_TOOLCHAIN}" \
+        -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
+        -DOCCT_KERNEL_WASM=ON \
+        -DOCCT_ROOT="${OCCT_INSTALL_DIR}" \
+        -G "Unix Makefiles"
+else
+    echo "[build-wasm] Reusing existing configure (${CMAKE_BUILD_TYPE})..."
+fi
 
 CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 echo "[build-wasm] Building with ${CPU_COUNT} parallel jobs..."

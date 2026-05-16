@@ -323,6 +323,8 @@ npm run build
 
 On Windows, `npm run build:occt` and `npm run build:wasm` use the PowerShell wrappers in `scripts/` so the local Emscripten `.bat` entrypoints are used directly.
 
+For faster local iteration, use `npm run build:wasm:fast`. That uses a separate `Fast` CMake build with low optimization and no debug source maps, and the wrapper scripts reuse the existing CMake configure unless you explicitly request a reconfigure.
+
 Output: `dist/occt-kernel.js`, `dist/occt-kernel.wasm`, `dist/index.js`, `dist/index.mjs`, `dist/index.d.ts`
 
 ---

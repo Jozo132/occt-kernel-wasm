@@ -16,6 +16,29 @@
 # =============================================================================
 set -euo pipefail
 
+SECONDS=0
+
+format_elapsed() {
+    local total_seconds="$1"
+    local hours=$(( total_seconds / 3600 ))
+    local minutes=$(( (total_seconds % 3600) / 60 ))
+    local seconds=$(( total_seconds % 60 ))
+
+    if [ "${hours}" -gt 0 ]; then
+        printf '%sh %sm %ss' "${hours}" "${minutes}" "${seconds}"
+    elif [ "${minutes}" -gt 0 ]; then
+        printf '%sm %ss' "${minutes}" "${seconds}"
+    else
+        printf '%ss' "${seconds}"
+    fi
+}
+
+print_elapsed_time() {
+    echo "[build-native] Finished in $(format_elapsed "${SECONDS}")"
+}
+
+trap print_elapsed_time EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
