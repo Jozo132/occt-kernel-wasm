@@ -164,3 +164,6 @@ third-party/occt-wasm/
 
 # Emscripten cache
 .emscripten_cache/
+build-wasm-fast/.ninja_lock
+build-wasm-fast/.ninja_log
+build-wasm-fast/.ninja_deps

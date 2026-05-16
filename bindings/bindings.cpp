@@ -40,6 +40,10 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
 
         // Queries
         .function("getTopology",    &OcctKernel::getTopology)
+        .function("getRevisionInfo", &OcctKernel::getRevisionInfo)
+        .function("resolveStableEntity", &OcctKernel::resolveStableEntity)
+        .function("mapEntitiesAcrossRevisions", &OcctKernel::mapEntitiesAcrossRevisions)
+        .function("getCapabilities", &OcctKernel::getCapabilities)
         .function("checkValidity",  &OcctKernel::checkValidity)
 
         // Tessellation
@@ -49,8 +53,12 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         .function("importStep", &OcctKernel::importStep)
         .function("importStepDetailed", &OcctKernel::importStepDetailed)
         .function("exportStep", &OcctKernel::exportStep)
+        .function("createCheckpoint", &OcctKernel::createCheckpoint)
+        .function("hydrateCheckpoint", &OcctKernel::hydrateCheckpoint)
 
         // Memory
         .function("disposeShape", &OcctKernel::disposeShape)
+        .function("retainRevision", &OcctKernel::retainRevision)
+        .function("releaseRevision", &OcctKernel::releaseRevision)
         ;
 }

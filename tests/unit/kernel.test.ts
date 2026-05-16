@@ -443,9 +443,120 @@ describe('getTopology', () => {
         expect(typeof topo.boundingBox.xMax).toBe('number');
     });
 
+    it('returns additive revision and subshape metadata when available', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const topo = k.getTopology(box);
+
+        expect(topo.revisionId).toMatch(/^rev_/);
+        expect(topo.topologyHash).toMatch(/^T:/);
+        expect(topo.historySchemaVersion).toBe(1);
+        expect(topo.faces).toHaveLength(topo.faceCount);
+        expect(topo.edges).toHaveLength(topo.edgeCount);
+        expect(topo.vertices).toHaveLength(topo.vertexCount);
+        expect(topo.faces?.[0]?.stableHash).toMatch(/^F:/);
+        expect(topo.edges?.[0]?.topoFaceIds?.length).toBeGreaterThan(0);
+        expect(topo.deletedEntities).toEqual([]);
+    });
+
     it('throws KernelError for invalid handle', () => {
         const k = makeKernel();
         expect(() => k.getTopology({ id: 9999 })).toThrow(KernelError);
+    });
+});
+
+describe('getCapabilities', () => {
+    it('reports implemented feature-edge and topology contracts without claiming history support', () => {
+        const k = makeKernel();
+        const capabilities = k.getCapabilities();
+
+        expect(capabilities.featureEdgesV1).toBe(true);
+        expect(capabilities.rawEdgeSegmentsV1).toBe(true);
+        expect(capabilities.triangleNormalsV1).toBe(true);
+        expect(capabilities.topologySubshapesV1).toBe(true);
+        expect(capabilities.revisionInfoV1).toBe(true);
+        expect(capabilities.entityResolutionV1).toBe(true);
+        expect(capabilities.entityRemapV1).toBe(true);
+        expect(capabilities.revisionRetentionV1).toBe(true);
+        expect(capabilities.historyV1).toBe(true);
+        expect(capabilities.stableNamingV1).toBe(false);
+        expect(capabilities.checkpointV1).toBe(true);
+    });
+});
+
+describe('revision identity APIs', () => {
+    it('returns revision info for a resident handle', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const revision = k.getRevisionInfo(box);
+
+        expect(revision.revisionId).toMatch(/^rev_/);
+        expect(revision.operationType).toBe('box');
+        expect(revision.historySchemaVersion).toBe(1);
+        expect(revision.entityStatus).toBe('generated');
+    });
+
+    it('resolves stable topology entities without consulting mesh edges', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const topology = k.getTopology(box);
+        const stableHash = topology.faces?.[0]?.stableHash;
+        expect(stableHash).toBeDefined();
+
+        const resolved = k.resolveStableEntity({ shape: box, stableHash: stableHash ?? '' });
+        expect(resolved).toMatchObject({
+            found: true,
+            status: 'active',
+            kind: 'face',
+            id: 1,
+        });
+    });
+
+    it('maps stable hashes across resident revisions', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const moved = k.transformShape({ shape: box, transform: { translation: [1, 2, 3] } });
+        const sourceTopology = k.getTopology(box);
+        const sourceRevision = k.getRevisionInfo(box);
+        const targetRevision = k.getRevisionInfo(moved);
+        const stableHash = sourceTopology.faces?.[0]?.stableHash ?? '';
+
+        const mapping = k.mapEntitiesAcrossRevisions({
+            fromRevisionId: sourceRevision.revisionId,
+            toRevisionId: targetRevision.revisionId,
+            stableHashes: [stableHash],
+        });
+
+        expect(mapping.mappings).toHaveLength(1);
+        expect(mapping.mappings[0]).toMatchObject({
+            stableHash,
+            status: 'mapped',
+            mappedStableHash: stableHash,
+        });
+    });
+
+    it('round-trips checkpoint metadata and hydrates a new handle', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const checkpoint = k.createCheckpoint({ shape: box });
+        const hydrated = k.hydrateCheckpoint({ checkpoint });
+        const revision = k.getRevisionInfo(hydrated);
+
+        expect(checkpoint.checkpointSchemaVersion).toBe(1);
+        expect(checkpoint.brep.length).toBeGreaterThan(0);
+        expect(revision.createdFromCheckpoint).toBe(true);
+        expect(revision.revisionId).toBe(checkpoint.revision.revisionId);
+    });
+
+    it('retains and releases resident revisions by reference count', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        k.retainRevision({ shape: box });
+        expect(k.releaseRevision({ shape: box })).toBe(false);
+        expect(k.checkValidity(box)).toBe(true);
+        expect(k.releaseRevision({ shape: box })).toBe(true);
+        expect(k.checkValidity(box)).toBe(false);
     });
 });
 
@@ -480,6 +591,28 @@ describe('tessellate', () => {
         expect(mesh.positions.length).toBeGreaterThan(0);
         expect(mesh.normals.length).toBe(mesh.positions.length);
         expect(mesh.indices.length % 3).toBe(0); // triangles
+    });
+
+    it('returns triangle metadata and sanitized feature-edge chains separately from raw debug edges', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const mesh = k.tessellate({ shape: box });
+        const triangleCount = mesh.indices.length / 3;
+
+        expect(mesh.triangleNormals).toBeInstanceOf(Float32Array);
+        expect(mesh.triangleNormals?.length).toBe(triangleCount * 3);
+        expect(mesh.triangleTopoFaceIds).toBeInstanceOf(Uint32Array);
+        expect(mesh.triangleTopoFaceIds?.length).toBe(triangleCount);
+        expect(mesh.triangleFaceGroups?.length).toBe(triangleCount);
+        expect(mesh.triangleStableHashes?.length).toBe(triangleCount);
+        expect(mesh.featureEdges?.[0]).toMatchObject({
+            isClosed: false,
+            chainId: 1,
+            isSharp: true,
+        });
+        expect(mesh.featureEdges?.[0]?.points.length).toBeGreaterThan(1);
+        expect(mesh.rawEdgeSegments).toBeInstanceOf(Float32Array);
+        expect((mesh as unknown as Record<string, unknown>).edgeSegments).toBeUndefined();
     });
 
     it('applies default deflection values', () => {

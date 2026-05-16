@@ -228,8 +228,30 @@ export interface TessellationResult {
     readonly positions: Float32Array;
     readonly normals: Float32Array;
     readonly indices: Uint32Array;
-    /** Optional: edge polyline segments (pairs of points). */
-    readonly edgeSegments?: Float32Array;
+    /** One explicit geometric normal per triangle, flat [nx, ny, nz, ...]. */
+    readonly triangleNormals?: Float32Array;
+    /** Runtime topological face id for each triangle. */
+    readonly triangleTopoFaceIds?: Uint32Array;
+    /** Face grouping id for each triangle. Currently mirrors `triangleTopoFaceIds`. */
+    readonly triangleFaceGroups?: Uint32Array;
+    /** Face stable hash for each triangle. */
+    readonly triangleStableHashes?: readonly string[];
+    /** Sanitized selectable CAD feature-edge chains. */
+    readonly featureEdges?: readonly FeatureEdgeChain[];
+    /** Debug-only raw tessellation/topological edge point dump. Do not use for selection. */
+    readonly rawEdgeSegments?: Float32Array;
+}
+
+export interface FeatureEdgeChain {
+    readonly points: readonly Point3[];
+    readonly isClosed: boolean;
+    readonly chainId: number;
+    readonly faceIndices: readonly number[];
+    readonly topoFaceIds: readonly number[];
+    readonly isBoundary: boolean;
+    readonly isSharp: boolean;
+    readonly isSeam?: boolean;
+    readonly stableHash?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +259,15 @@ export interface TessellationResult {
 // ---------------------------------------------------------------------------
 
 export interface TopologyResult {
+    readonly revisionId?: string;
+    readonly operationId?: string | null;
+    readonly sourceFeatureId?: string | null;
+    readonly operationType?: string;
+    readonly operandRevisionIds?: readonly string[];
+    readonly parameterHash?: string | null;
+    readonly topologyHash?: string;
+    readonly historySchemaVersion?: number;
+    readonly createdFromCheckpoint?: boolean;
     readonly faceCount: number;
     readonly edgeCount: number;
     readonly vertexCount: number;
@@ -244,6 +275,126 @@ export interface TopologyResult {
     readonly boundingBox: BoundingBox;
     /** True if the shape is geometrically and topologically valid. */
     readonly isValid: boolean;
+    readonly faces?: readonly TopologyFace[];
+    readonly edges?: readonly TopologyEdge[];
+    readonly vertices?: readonly TopologyVertex[];
+    readonly deletedEntities?: readonly TopologyDeletedEntity[];
+}
+
+export type TopologyEntityStatus = 'generated' | 'modified' | 'retained' | 'deleted' | 'unresolved';
+export type RevisionIdentityStatus = 'generated' | 'retained' | 'resolved' | 'unresolved';
+
+export interface TopologyFace {
+    readonly id: number;
+    readonly stableHash?: string;
+    readonly role?: string;
+    readonly sourceFeatureId?: string | null;
+    readonly generatedFrom?: readonly (string | number)[];
+    readonly modifiedFrom?: readonly (string | number)[];
+    readonly retainedFrom?: readonly (string | number)[];
+    readonly status?: TopologyEntityStatus;
+    readonly shared?: {
+        readonly sourceFeatureId?: string;
+    };
+}
+
+export interface TopologyEdge {
+    readonly id: number;
+    readonly stableHash?: string;
+    readonly topoFaceIds?: readonly number[];
+    readonly generatedFrom?: readonly (string | number)[];
+    readonly modifiedFrom?: readonly (string | number)[];
+    readonly retainedFrom?: readonly (string | number)[];
+    readonly status?: TopologyEntityStatus;
+}
+
+export interface TopologyVertex {
+    readonly id: number;
+    readonly stableHash?: string;
+    readonly status?: TopologyEntityStatus;
+}
+
+export interface TopologyDeletedEntity {
+    readonly kind: 'face' | 'edge' | 'vertex';
+    readonly stableHash: string;
+    readonly deletedBy?: string;
+    readonly status?: TopologyEntityStatus;
+}
+
+export interface RevisionInfo {
+    readonly revisionId: string;
+    readonly operationId: string | null;
+    readonly sourceFeatureId: string | null;
+    readonly operationType: string;
+    readonly operandRevisionIds: readonly string[];
+    readonly parameterHash: string | null;
+    readonly topologyHash: string;
+    readonly historySchemaVersion: number;
+    readonly createdFromCheckpoint: boolean;
+    readonly entityStatus: TopologyEntityStatus;
+    readonly identityStatus: RevisionIdentityStatus;
+    readonly historyWarnings: readonly string[];
+    readonly deletedEntities: readonly TopologyDeletedEntity[];
+    readonly faceStableHashes?: readonly string[];
+    readonly edgeStableHashes?: readonly string[];
+    readonly vertexStableHashes?: readonly string[];
+}
+
+export interface ResolveStableEntityParams {
+    readonly shape: ShapeHandle;
+    readonly stableHash: string;
+}
+
+export interface StableEntityResolution {
+    readonly found: boolean;
+    readonly status: 'active' | 'deleted' | 'unresolved';
+    readonly kind?: 'face' | 'edge' | 'vertex';
+    readonly id?: number;
+    readonly stableHash: string;
+    readonly revisionId: string;
+    readonly deletedBy?: string;
+    readonly message?: string;
+}
+
+export interface MapEntitiesAcrossRevisionsParams {
+    readonly fromRevisionId: string;
+    readonly toRevisionId: string;
+    readonly stableHashes: readonly string[];
+}
+
+export interface EntityRevisionMapping {
+    readonly stableHash: string;
+    readonly status: 'mapped' | 'deleted' | 'unresolved' | 'missing';
+    readonly mappedStableHash: string | null;
+    readonly message?: string;
+}
+
+export interface EntityRevisionMapResult {
+    readonly fromRevisionId: string;
+    readonly toRevisionId: string;
+    readonly mappings: readonly EntityRevisionMapping[];
+}
+
+export interface CreateCheckpointParams {
+    readonly shape: ShapeHandle;
+}
+
+export interface RevisionCheckpoint {
+    readonly checkpointSchemaVersion: number;
+    readonly brep: string;
+    readonly revision: RevisionInfo;
+}
+
+export interface HydrateCheckpointParams {
+    readonly checkpoint: RevisionCheckpoint | string;
+}
+
+export interface RetainRevisionParams {
+    readonly shape: ShapeHandle;
+}
+
+export interface ReleaseRevisionParams {
+    readonly shape: ShapeHandle;
 }
 
 export interface BoundingBox {
@@ -253,6 +404,22 @@ export interface BoundingBox {
     readonly xMax: number;
     readonly yMax: number;
     readonly zMax: number;
+}
+
+export interface KernelCapabilities {
+    readonly featureEdgesV1: boolean;
+    readonly rawEdgeSegmentsV1: boolean;
+    readonly triangleNormalsV1: boolean;
+    readonly triangleFaceMappingV1: boolean;
+    readonly topologySubshapesV1: boolean;
+    readonly geometricStableHashesV1: boolean;
+    readonly revisionInfoV1: boolean;
+    readonly entityResolutionV1: boolean;
+    readonly entityRemapV1: boolean;
+    readonly revisionRetentionV1: boolean;
+    readonly historyV1: boolean;
+    readonly stableNamingV1: boolean;
+    readonly checkpointV1: boolean;
 }
 
 // ---------------------------------------------------------------------------

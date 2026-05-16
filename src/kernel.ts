@@ -23,24 +23,36 @@ import type {
     BoundingBox,
     BoxParams,
     ChamferParams,
+    CreateCheckpointParams,
     CylinderParams,
     DisposeParams,
+    EntityRevisionMapResult,
     ExportStepParams,
     ExtrudeParams,
+    FeatureEdgeChain,
     FilletParams,
     ImportStepDetailedResult,
     ImportStepParams,
+    KernelCapabilities,
+    HydrateCheckpointParams,
+    MapEntitiesAcrossRevisionsParams,
     PlaneFrame,
     Point2,
     Point3,
     Profile,
     ProfileSegment,
     ProfileWire,
+    ReleaseRevisionParams,
+    ResolveStableEntityParams,
+    RetainRevisionParams,
     RevolveParams,
+    RevisionCheckpoint,
+    RevisionInfo,
     RotationTransform,
     ShapeHandle,
     ShapeTransform,
     SphereParams,
+    StableEntityResolution,
     StepImportMessage,
     StepImportOptions,
     StepImportReadStatus,
@@ -73,6 +85,10 @@ export interface NativeKernel {
     chamferEdges(id: number, distance: number): number;
     transformShape(id: number, transformJson: string): number;
     getTopology(id: number): string;
+    getRevisionInfo?: (id: number) => string;
+    resolveStableEntity?: (id: number, stableHash: string) => string;
+    mapEntitiesAcrossRevisions?: (fromRevisionId: string, toRevisionId: string, stableHashesJson: string) => string;
+    getCapabilities?: () => string;
     checkValidity(id: number): boolean;
     tessellate(id: number, linearDeflection: number, angularDeflection: number): string;
     importStep(content: string): number;
@@ -85,7 +101,11 @@ export interface NativeKernel {
         sewingTolerance: number,
     ): string;
     exportStep(id: number): string;
+    createCheckpoint?: (id: number) => string;
+    hydrateCheckpoint?: (checkpointJson: string) => number;
     disposeShape(id: number): void;
+    retainRevision?: (id: number) => void;
+    releaseRevision?: (id: number) => boolean;
 }
 
 export interface WasmModule {
@@ -207,16 +227,46 @@ interface RawTessellation {
     positions: number[];
     normals: number[];
     indices: number[];
-    edgeSegments?: number[];
+    triangleNormals?: number[];
+    triangleTopoFaceIds?: number[];
+    triangleFaceGroups?: number[];
+    triangleStableHashes?: string[];
+    featureEdges?: FeatureEdgeChain[];
+    rawEdgeSegments?: number[];
 }
 
 interface RawTopology {
+    revisionId?: string;
+    operationId?: string | null;
+    sourceFeatureId?: string | null;
+    operationType?: string;
+    operandRevisionIds?: string[];
+    parameterHash?: string | null;
+    topologyHash?: string;
+    historySchemaVersion?: number;
+    createdFromCheckpoint?: boolean;
     faceCount: number;
     edgeCount: number;
     vertexCount: number;
     boundingBox: BoundingBox;
     isValid: boolean;
 }
+
+const fallbackCapabilities: KernelCapabilities = {
+    featureEdgesV1: false,
+    rawEdgeSegmentsV1: false,
+    triangleNormalsV1: false,
+    triangleFaceMappingV1: false,
+    topologySubshapesV1: false,
+    geometricStableHashesV1: false,
+    revisionInfoV1: false,
+    entityResolutionV1: false,
+    entityRemapV1: false,
+    revisionRetentionV1: false,
+    historyV1: false,
+    stableNamingV1: false,
+    checkpointV1: false,
+};
 
 interface RawStepImportMessage extends StepImportMessage {}
 
@@ -574,10 +624,51 @@ export class OcctKernel {
     // Queries
     // -----------------------------------------------------------------------
 
+    /** Return additive contract flags supported by the loaded native module. */
+    getCapabilities(): KernelCapabilities {
+        if (typeof this._native.getCapabilities !== 'function') {
+            return fallbackCapabilities;
+        }
+        return {
+            ...fallbackCapabilities,
+            ...parseJson<Partial<KernelCapabilities>>(wrap(() => this._native.getCapabilities?.() ?? '{}'), 'capabilities'),
+        };
+    }
+
     /** Return face, edge, vertex counts, bounding box, and validity flag. */
     getTopology(shape: ShapeHandle): TopologyResult {
         const raw = wrap(() => this._native.getTopology(shape.id));
         return parseJson<RawTopology>(raw, 'topology');
+    }
+
+    /** Return immutable revision metadata for a resident shape handle. */
+    getRevisionInfo(shape: ShapeHandle): RevisionInfo {
+        if (typeof this._native.getRevisionInfo !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support getRevisionInfo');
+        }
+        return parseJson<RevisionInfo>(wrap(() => this._native.getRevisionInfo?.(shape.id) ?? '{}'), 'revision info');
+    }
+
+    /** Resolve a stable face/edge/vertex hash in the current resident revision. */
+    resolveStableEntity(params: ResolveStableEntityParams): StableEntityResolution {
+        if (typeof this._native.resolveStableEntity !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support resolveStableEntity');
+        }
+        const raw = wrap(() => this._native.resolveStableEntity?.(params.shape.id, params.stableHash) ?? '{}');
+        return parseJson<StableEntityResolution>(raw, 'stable entity resolution');
+    }
+
+    /** Map stable hashes between two resident revisions without JS mesh inference. */
+    mapEntitiesAcrossRevisions(params: MapEntitiesAcrossRevisionsParams): EntityRevisionMapResult {
+        if (typeof this._native.mapEntitiesAcrossRevisions !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support mapEntitiesAcrossRevisions');
+        }
+        const raw = wrap(() => this._native.mapEntitiesAcrossRevisions?.(
+            params.fromRevisionId,
+            params.toRevisionId,
+            JSON.stringify(params.stableHashes),
+        ) ?? '{}');
+        return parseJson<EntityRevisionMapResult>(raw, 'entity revision mapping');
     }
 
     /** Return true when the shape is geometrically and topologically valid. */
@@ -608,8 +699,23 @@ export class OcctKernel {
             positions: new Float32Array(data.positions),
             normals:   new Float32Array(data.normals),
             indices:   new Uint32Array(data.indices),
-            ...(data.edgeSegments !== undefined
-                ? { edgeSegments: new Float32Array(data.edgeSegments) }
+            ...(data.triangleNormals !== undefined
+                ? { triangleNormals: new Float32Array(data.triangleNormals) }
+                : {}),
+            ...(data.triangleTopoFaceIds !== undefined
+                ? { triangleTopoFaceIds: new Uint32Array(data.triangleTopoFaceIds) }
+                : {}),
+            ...(data.triangleFaceGroups !== undefined
+                ? { triangleFaceGroups: new Uint32Array(data.triangleFaceGroups) }
+                : {}),
+            ...(data.triangleStableHashes !== undefined
+                ? { triangleStableHashes: data.triangleStableHashes }
+                : {}),
+            ...(data.featureEdges !== undefined
+                ? { featureEdges: data.featureEdges }
+                : {}),
+            ...(data.rawEdgeSegments !== undefined
+                ? { rawEdgeSegments: new Float32Array(data.rawEdgeSegments) }
                 : {}),
         };
     }
@@ -666,6 +772,25 @@ export class OcctKernel {
         return wrap(() => this._native.exportStep(params.shape.id));
     }
 
+    /** Create a JSON checkpoint containing CBREP plus revision/history metadata. */
+    createCheckpoint(params: CreateCheckpointParams): RevisionCheckpoint {
+        if (typeof this._native.createCheckpoint !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support createCheckpoint');
+        }
+        return parseJson<RevisionCheckpoint>(wrap(() => this._native.createCheckpoint?.(params.shape.id) ?? '{}'), 'checkpoint');
+    }
+
+    /** Hydrate a checkpoint created by {@link createCheckpoint}. */
+    hydrateCheckpoint(params: HydrateCheckpointParams): ShapeHandle {
+        if (typeof this._native.hydrateCheckpoint !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support hydrateCheckpoint');
+        }
+        const checkpointJson = typeof params.checkpoint === 'string'
+            ? params.checkpoint
+            : JSON.stringify(params.checkpoint);
+        return makeHandle(wrap(() => this._native.hydrateCheckpoint?.(checkpointJson) ?? 0));
+    }
+
     // -----------------------------------------------------------------------
     // Memory management
     // -----------------------------------------------------------------------
@@ -677,5 +802,21 @@ export class OcctKernel {
      */
     disposeShape(params: DisposeParams): void {
         wrap(() => this._native.disposeShape(params.shape.id));
+    }
+
+    /** Increment the native reference count for a resident immutable revision. */
+    retainRevision(params: RetainRevisionParams): void {
+        if (typeof this._native.retainRevision !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support retainRevision');
+        }
+        wrap(() => this._native.retainRevision?.(params.shape.id));
+    }
+
+    /** Decrement the native reference count and return true when the revision was evicted. */
+    releaseRevision(params: ReleaseRevisionParams): boolean {
+        if (typeof this._native.releaseRevision !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support releaseRevision');
+        }
+        return wrap(() => this._native.releaseRevision?.(params.shape.id) ?? false);
     }
 }

@@ -162,10 +162,48 @@ const chamfered = kernel.chamferEdges({ shape: box, distance: 1.5 });
 ```ts
 const topo = kernel.getTopology(box);
 // {
+//   revisionId: 'rev_...', topologyHash: 'T:...', historySchemaVersion: 1,
+//   operationId: 'op_...', operationType: 'createBox', operandRevisionIds: [],
+//   identityStatus: 'generated', historyWarnings: [],
 //   faceCount: 6, edgeCount: 12, vertexCount: 8,
 //   boundingBox: { xMin: 0, yMin: 0, zMin: 0, xMax: 100, yMax: 50, zMax: 25 },
-//   isValid: true
+//   isValid: true,
+//   faces: [{ id: 1, stableHash: 'F:...', status: 'generated' }],
+//   edges: [{ id: 1, stableHash: 'E:...', topoFaceIds: [1, 2], status: 'generated' }],
+//   vertices: [{ id: 1, stableHash: 'V:...', status: 'generated' }],
+//   deletedEntities: []
 // }
+
+const capabilities = kernel.getCapabilities();
+// featureEdgesV1, triangleNormalsV1, topologySubshapesV1, historyV1,
+// entityRemapV1, revisionRetentionV1, and checkpointV1 are available.
+// stableNamingV1 remains false until full semantic naming for booleans,
+// fillets/chamfers, and healed imports is proven beyond geometry-derived ids.
+```
+
+### Revision history, remap, and checkpoints
+
+```ts
+const revision = kernel.getRevisionInfo(box);
+
+const moved = kernel.transformShape({
+    shape: box,
+    transform: { translation: [25, 0, 0] },
+});
+
+const firstFaceHash = topo.faces?.[0]?.stableHash ?? '';
+const resolved = kernel.resolveStableEntity({ shape: moved, stableHash: firstFaceHash });
+const remap = kernel.mapEntitiesAcrossRevisions({
+    fromRevisionId: revision.revisionId,
+    toRevisionId: kernel.getRevisionInfo(moved).revisionId,
+    stableHashes: [firstFaceHash],
+});
+
+const checkpoint = kernel.createCheckpoint({ shape: moved });
+const restored = kernel.hydrateCheckpoint({ checkpoint });
+
+kernel.retainRevision({ shape: restored });
+kernel.releaseRevision({ shape: restored });
 ```
 
 ### Tessellation
@@ -176,7 +214,22 @@ const mesh = kernel.tessellate({ shape: box, linearDeflection: 0.1 });
 //   positions: Float32Array,  // [x0,y0,z0, x1,y1,z1, ...]
 //   normals:   Float32Array,  // [nx0,ny0,nz0, ...]
 //   indices:   Uint32Array,   // [i0,i1,i2, ...] triangles
-//   edgeSegments?: Float32Array
+//   triangleNormals?: Float32Array,
+//   triangleTopoFaceIds?: Uint32Array,
+//   triangleFaceGroups?: Uint32Array,
+//   triangleStableHashes?: string[],
+//   featureEdges?: [{
+//     points: [[x, y, z], [x, y, z]],
+//     isClosed: false,
+//     chainId: 1,
+//     faceIndices: [1, 2],
+//     topoFaceIds: [1, 2],
+//     isBoundary: false,
+//     isSharp: true,
+//     isSeam: false,
+//     stableHash: 'E:...'
+//   }],
+//   rawEdgeSegments?: Float32Array // debug only; do not use for selection
 // }
 ```
 

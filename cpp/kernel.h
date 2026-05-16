@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // Forward-declare so that headers that only include kernel.h do not need to
 // pull in OCCT. The OCCT headers are included in kernel.cpp.
@@ -94,10 +95,24 @@ public:
     // -----------------------------------------------------------------------
 
     /**
-     * Return a JSON string containing:
-     *   faceCount, edgeCount, vertexCount, boundingBox, isValid
+        * Return a JSON string containing summary counts plus additive revision and
+        * subshape metadata for faces, edges, and vertices.
      */
     std::string getTopology(uint32_t id);
+
+    /// Return metadata for the immutable exact revision represented by a handle.
+    std::string getRevisionInfo(uint32_t id);
+
+    /// Resolve a stable face/edge/vertex hash in the current exact topology.
+    std::string resolveStableEntity(uint32_t id, const std::string& stableHash);
+
+    /// Map stable hashes from one resident revision id to another.
+    std::string mapEntitiesAcrossRevisions(const std::string& fromRevisionId,
+                                           const std::string& toRevisionId,
+                                           const std::string& stableHashesJson);
+
+    /// Return capability flags for additive API contracts exposed by this build.
+    std::string getCapabilities() const;
 
     bool checkValidity(uint32_t id);
 
@@ -107,7 +122,7 @@ public:
 
     /**
      * Triangulate the shape and return a JSON string containing:
-     *   positions[], normals[], indices[], edgeSegments[]
+        *   positions[], normals[], indices[], triangle metadata, featureEdges[], rawEdgeSegments[]
      */
     std::string tessellate(uint32_t id, double linearDeflection, double angularDeflection);
 
@@ -129,6 +144,12 @@ public:
     /// Write the shape to STEP format and return the file content as a string.
     std::string exportStep(uint32_t id);
 
+    /// Serialize CBREP plus revision/history metadata to a JSON checkpoint.
+    std::string createCheckpoint(uint32_t id);
+
+    /// Hydrate a checkpoint JSON payload and return a resident handle.
+    uint32_t hydrateCheckpoint(const std::string& checkpointJson);
+
     // -----------------------------------------------------------------------
     // Memory management
     // -----------------------------------------------------------------------
@@ -136,12 +157,26 @@ public:
     /// Release the native memory for the given handle.
     void disposeShape(uint32_t id);
 
+    /// Increment the resident revision reference count.
+    void retainRevision(uint32_t id);
+
+    /// Decrement the resident revision reference count; returns true if evicted.
+    bool releaseRevision(uint32_t id);
+
 private:
     struct Impl;
     Impl* _impl;
 
     uint32_t storeShape(const TopoDS_Shape& shape);
+    uint32_t storeShapeWithMetadata(const TopoDS_Shape& shape,
+                                    const std::string& operationType,
+                                    const std::string& parameterSignature,
+                                    const std::vector<std::string>& operandRevisionIds,
+                                    const std::string& entityStatus,
+                                    const std::string& identityStatus,
+                                    const std::vector<std::string>& warnings);
     const TopoDS_Shape& requireShape(uint32_t id) const;
+    std::string requireRevisionId(uint32_t id) const;
 };
 
 } // namespace occt_kernel

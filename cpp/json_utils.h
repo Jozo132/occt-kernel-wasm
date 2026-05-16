@@ -222,6 +222,19 @@ private:
                 if (current_ >= end_) {
                     break;
                 }
+                const char escaped = *current_++;
+                switch (escaped) {
+                case '"': output += '"'; break;
+                case '\\': output += '\\'; break;
+                case '/': output += '/'; break;
+                case 'b': output += '\b'; break;
+                case 'f': output += '\f'; break;
+                case 'n': output += '\n'; break;
+                case 'r': output += '\r'; break;
+                case 't': output += '\t'; break;
+                default: output += escaped; break;
+                }
+                continue;
             }
             output += *current_++;
         }

@@ -91,11 +91,13 @@ function isZeroVector(value: readonly number[]): boolean {
 
 export class MockNativeKernel {
     private _shapes = new Map<number, MockShape>();
+    private _refCounts = new Map<number, number>();
     private _nextId = 1;
 
     private _store(kind: string, params: Record<string, unknown>): number {
         const id = this._nextId++;
         this._shapes.set(id, { kind, params });
+        this._refCounts.set(id, 1);
         return id;
     }
 
@@ -105,6 +107,31 @@ export class MockNativeKernel {
             throw new KernelError('INVALID_HANDLE', `No shape with handle ${id}`);
         }
         return shape;
+    }
+
+    private _revisionInfo(id: number): Record<string, unknown> {
+        const shape = this._require(id);
+        if (typeof shape.params.revisionInfo === 'object' && shape.params.revisionInfo !== null) {
+            return shape.params.revisionInfo as Record<string, unknown>;
+        }
+
+        const unresolved = ['union', 'subtract', 'intersect', 'fillet', 'chamfer'].includes(shape.kind);
+        const retained = shape.kind === 'transform';
+        return {
+            revisionId: `rev_mock_${id}`,
+            operationId: `op_mock_${id}`,
+            sourceFeatureId: `op_mock_${id}`,
+            operationType: shape.kind,
+            operandRevisionIds: [],
+            parameterHash: `P:mock_${shape.kind}`,
+            topologyHash: `T:mock_${shape.kind}_${id}`,
+            historySchemaVersion: 1,
+            createdFromCheckpoint: false,
+            entityStatus: unresolved ? 'unresolved' : retained ? 'retained' : 'generated',
+            identityStatus: unresolved ? 'unresolved' : retained ? 'retained' : 'generated',
+            historyWarnings: unresolved ? ['Mock lineage is unresolved for this operation'] : [],
+            deletedEntities: [],
+        };
     }
 
     // -- Primitives --
@@ -335,12 +362,99 @@ export class MockNativeKernel {
 
     getTopology(id: number): string {
         const shape = this._require(id);
+        const revision = this._revisionInfo(id);
         return JSON.stringify({
+            ...revision,
             faceCount: 6,
             edgeCount: 12,
             vertexCount: 8,
             boundingBox: { xMin: 0, yMin: 0, zMin: 0, xMax: 1, yMax: 1, zMax: 1 },
             isValid: shape.params.invalid !== true,
+            faces: Array.from({ length: 6 }, (_, index) => ({
+                id: index + 1,
+                stableHash: `F:mock_${shape.kind}_${index + 1}`,
+                role: 'unknown',
+                sourceFeatureId: null,
+                generatedFrom: [],
+                modifiedFrom: [],
+                retainedFrom: [],
+                status: revision.entityStatus,
+                shared: {},
+            })),
+            edges: Array.from({ length: 12 }, (_, index) => ({
+                id: index + 1,
+                stableHash: `E:mock_${shape.kind}_${index + 1}`,
+                topoFaceIds: [1, 2],
+                generatedFrom: [],
+                modifiedFrom: [],
+                retainedFrom: [],
+                status: revision.entityStatus,
+            })),
+            vertices: Array.from({ length: 8 }, (_, index) => ({
+                id: index + 1,
+                stableHash: `V:mock_${shape.kind}_${index + 1}`,
+                status: revision.entityStatus,
+            })),
+            deletedEntities: revision.deletedEntities,
+        });
+    }
+
+    getRevisionInfo(id: number): string {
+        this._require(id);
+        return JSON.stringify(this._revisionInfo(id));
+    }
+
+    resolveStableEntity(id: number, stableHash: string): string {
+        const shape = this._require(id);
+        const revision = this._revisionInfo(id);
+        const match = /^(F|E|V):mock_[^_]+_(\d+)$/.exec(stableHash);
+        if (match) {
+            return JSON.stringify({
+                found: true,
+                status: 'active',
+                kind: match[1] === 'F' ? 'face' : match[1] === 'E' ? 'edge' : 'vertex',
+                id: Number(match[2]),
+                stableHash,
+                revisionId: revision.revisionId,
+            });
+        }
+        return JSON.stringify({
+            found: false,
+            status: 'unresolved',
+            stableHash,
+            revisionId: revision.revisionId,
+            message: `Stable entity is not present in mock ${shape.kind}`,
+        });
+    }
+
+    mapEntitiesAcrossRevisions(fromRevisionId: string, toRevisionId: string, stableHashesJson: string): string {
+        const stableHashes = JSON.parse(stableHashesJson) as string[];
+        return JSON.stringify({
+            fromRevisionId,
+            toRevisionId,
+            mappings: stableHashes.map((stableHash) => ({
+                stableHash,
+                status: 'mapped',
+                mappedStableHash: stableHash,
+            })),
+        });
+    }
+
+    getCapabilities(): string {
+        return JSON.stringify({
+            featureEdgesV1: true,
+            rawEdgeSegmentsV1: true,
+            triangleNormalsV1: true,
+            triangleFaceMappingV1: true,
+            topologySubshapesV1: true,
+            geometricStableHashesV1: true,
+            revisionInfoV1: true,
+            entityResolutionV1: true,
+            entityRemapV1: true,
+            revisionRetentionV1: true,
+            historyV1: true,
+            stableNamingV1: false,
+            checkpointV1: true,
         });
     }
 
@@ -358,6 +472,24 @@ export class MockNativeKernel {
             positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
             normals:   [0, 0, 1, 0, 0, 1, 0, 0, 1],
             indices:   [0, 1, 2],
+            triangleNormals: [0, 0, 1],
+            triangleTopoFaceIds: [1],
+            triangleFaceGroups: [1],
+            triangleStableHashes: ['F:mock_face_1'],
+            featureEdges: [
+                {
+                    points: [[0, 0, 0], [1, 0, 0]],
+                    isClosed: false,
+                    chainId: 1,
+                    faceIndices: [1, 2],
+                    topoFaceIds: [1, 2],
+                    isBoundary: false,
+                    isSharp: true,
+                    isSeam: false,
+                    stableHash: 'E:mock_edge_1',
+                },
+            ],
+            rawEdgeSegments: [0, 0, 0, 1, 0, 0],
         });
     }
 
@@ -446,10 +578,45 @@ export class MockNativeKernel {
         ].join('\n');
     }
 
+    createCheckpoint(id: number): string {
+        this._require(id);
+        return JSON.stringify({
+            checkpointSchemaVersion: 1,
+            brep: `mock-brep:${id}`,
+            revision: this._revisionInfo(id),
+        });
+    }
+
+    hydrateCheckpoint(checkpointJson: string): number {
+        const checkpoint = JSON.parse(checkpointJson) as { revision?: Record<string, unknown> };
+        const revisionInfo = {
+            ...(checkpoint.revision ?? {}),
+            createdFromCheckpoint: true,
+        };
+        return this._store('checkpoint', { revisionInfo });
+    }
+
     // -- Memory --
 
     disposeShape(id: number): void {
         this._shapes.delete(id);
+        this._refCounts.delete(id);
+    }
+
+    retainRevision(id: number): void {
+        this._require(id);
+        this._refCounts.set(id, (this._refCounts.get(id) ?? 1) + 1);
+    }
+
+    releaseRevision(id: number): boolean {
+        this._require(id);
+        const nextCount = (this._refCounts.get(id) ?? 1) - 1;
+        if (nextCount > 0) {
+            this._refCounts.set(id, nextCount);
+            return false;
+        }
+        this.disposeShape(id);
+        return true;
     }
 
     /** Returns the number of live shapes (for leak detection in tests). */
