@@ -35,7 +35,10 @@ import type {
     EdgeSampleResult,
     EntityRevisionMapResult,
     ExportStepParams,
+    ExtrudeCutProfileFeatureParams,
     ExtrudeParams,
+    ExtrudeProfileFeatureParams,
+    ExtrudeProfileSpec,
     FaceEvaluationParams,
     FaceEvaluationResult,
     FaceRef,
@@ -90,6 +93,8 @@ export interface NativeKernel {
     createCylinder(radius: number, height: number): number;
     createSphere(radius: number): number;
     extrudeProfile(profileJson: string, optionsJson: string): number;
+    extrudeProfileWithSpec?: (id: number, profileJson: string, specJson: string) => number;
+    extrudeCutProfileWithSpec?: (id: number, profileJson: string, specJson: string) => number;
     revolveProfile(profileJson: string, optionsJson: string): number;
     booleanUnion(id1: number, id2: number): number;
     booleanSubtract(id1: number, id2: number): number;
@@ -429,6 +434,22 @@ interface ExtrudeOptionsPayload {
     plane?: PlaneFrame;
 }
 
+interface ExtrudeProfileSpecPayload {
+    schemaVersion: 1;
+    allowUnknownFields?: boolean;
+    unit?: { length?: 'model'; angle?: 'radians' | 'degrees' };
+    plane?: PlaneFrame;
+    direction?: Vector3;
+    reverseDirection?: boolean;
+    draftAngleRadians?: number;
+    extent: { type: 'blind'; distance: number }
+        | { type: 'upToNext' }
+        | { type: 'throughAll' }
+        | { type: 'upToSurface'; surface: { shapeId?: number; face: FaceRef } }
+        | { type: 'offsetFromSurface'; surface: { shapeId?: number; face: FaceRef }; offset: number };
+    metadata?: Record<string, unknown>;
+}
+
 interface RevolveOptionsPayload {
     angleDegrees: number;
     axisOrigin?: Point3;
@@ -534,6 +555,104 @@ function normalizeExtrudeOptions(params: ExtrudeParams): ExtrudeOptionsPayload {
     return {
         vector: [...(params.vector as Vector3)] as Vector3,
         ...(plane ? { plane } : {}),
+    };
+}
+
+function normalizeExtrudeProfileSpec(spec: ExtrudeProfileSpec): ExtrudeProfileSpecPayload {
+    requireSchemaVersion(spec, 'extrude spec');
+
+    const unit = spec.unit !== undefined
+        ? (() => {
+            if (spec.unit.length !== undefined && spec.unit.length !== 'model') {
+                throw new KernelError('INVALID_PARAMS', 'extrude spec.unit.length must be model');
+            }
+            if (spec.unit.angle !== undefined && spec.unit.angle !== 'radians' && spec.unit.angle !== 'degrees') {
+                throw new KernelError('INVALID_PARAMS', 'extrude spec.unit.angle must be radians or degrees');
+            }
+            return {
+                ...(spec.unit.length !== undefined ? { length: spec.unit.length } : {}),
+                ...(spec.unit.angle !== undefined ? { angle: spec.unit.angle } : {}),
+            } as { length?: 'model'; angle?: 'radians' | 'degrees' };
+        })()
+        : undefined;
+
+    const plane = normalizePlaneFrame(spec.plane);
+    const direction = spec.direction !== undefined
+        ? (() => {
+            requireVector3(spec.direction, 'spec.direction');
+            return [...spec.direction] as Vector3;
+        })()
+        : undefined;
+
+    const hasDraftAngleRadians = spec.draftAngleRadians !== undefined;
+    const hasDraftAngleDegrees = spec.draftAngleDegrees !== undefined;
+    if (hasDraftAngleRadians && hasDraftAngleDegrees) {
+        throw new KernelError('INVALID_PARAMS', 'extrude spec must not specify both draftAngleRadians and draftAngleDegrees');
+    }
+
+    let draftAngleRadians: number | undefined;
+    if (hasDraftAngleRadians) {
+        requireFinite(spec.draftAngleRadians as number, 'spec.draftAngleRadians');
+        if (Math.abs(spec.draftAngleRadians as number) >= Math.PI / 2) {
+            throw new KernelError('INVALID_PARAMS', 'spec.draftAngleRadians must be in (-pi/2, pi/2)');
+        }
+        draftAngleRadians = spec.draftAngleRadians;
+    } else if (hasDraftAngleDegrees) {
+        requireFinite(spec.draftAngleDegrees as number, 'spec.draftAngleDegrees');
+        if (Math.abs(spec.draftAngleDegrees as number) >= 90) {
+            throw new KernelError('INVALID_PARAMS', 'spec.draftAngleDegrees must be in (-90, 90)');
+        }
+        draftAngleRadians = (spec.draftAngleDegrees as number) * Math.PI / 180;
+    }
+
+    const normalizeSurface = (name: string, surface: { readonly shape?: ShapeHandle; readonly face: FaceRef }) => ({
+        ...(surface.shape !== undefined ? { shapeId: surface.shape.id } : {}),
+        face: (() => {
+            requireFaceRef(surface.face, `${name}.face`);
+            return { ...surface.face };
+        })(),
+    });
+
+    const extent = (() => {
+        if (!spec.extent || typeof spec.extent !== 'object' || typeof spec.extent.type !== 'string') {
+            throw new KernelError('INVALID_PARAMS', 'spec.extent must be a structured extent descriptor');
+        }
+
+        switch (spec.extent.type) {
+            case 'blind':
+                requirePositive(spec.extent.distance, 'spec.extent.distance');
+                return { type: 'blind' as const, distance: spec.extent.distance };
+            case 'upToNext':
+                return { type: 'upToNext' as const };
+            case 'throughAll':
+                return { type: 'throughAll' as const };
+            case 'upToSurface':
+                return {
+                    type: 'upToSurface' as const,
+                    surface: normalizeSurface('spec.extent.surface', spec.extent.surface),
+                };
+            case 'offsetFromSurface':
+                requirePositive(spec.extent.offset, 'spec.extent.offset');
+                return {
+                    type: 'offsetFromSurface' as const,
+                    surface: normalizeSurface('spec.extent.surface', spec.extent.surface),
+                    offset: spec.extent.offset,
+                };
+            default:
+                throw new KernelError('INVALID_PARAMS', `spec.extent.type '${(spec.extent as { type: string }).type}' is not supported`);
+        }
+    })();
+
+    return {
+        schemaVersion: 1,
+        ...(spec.allowUnknownFields !== undefined ? { allowUnknownFields: spec.allowUnknownFields } : {}),
+        ...(unit ? { unit } : {}),
+        ...(plane ? { plane } : {}),
+        ...(direction ? { direction } : {}),
+        ...(spec.reverseDirection !== undefined ? { reverseDirection: spec.reverseDirection } : {}),
+        ...(draftAngleRadians !== undefined ? { draftAngleRadians } : {}),
+        extent,
+        ...(spec.metadata !== undefined ? { metadata: spec.metadata } : {}),
     };
 }
 
@@ -643,6 +762,26 @@ export class OcctKernel {
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
         const optionsJson = JSON.stringify(normalizeExtrudeOptions(params));
         return makeHandle(wrap(() => this._native.extrudeProfile(profileJson, optionsJson)));
+    }
+
+    /** Apply a versioned additive profile extrusion feature spec to a resident shape. */
+    extrudeProfileWithSpec(params: ExtrudeProfileFeatureParams): ShapeHandle {
+        if (typeof this._native.extrudeProfileWithSpec !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support extrudeProfileWithSpec');
+        }
+        const profileJson = JSON.stringify(normalizeProfile(params.profile));
+        const specJson = JSON.stringify(normalizeExtrudeProfileSpec(params.spec));
+        return makeHandle(wrap(() => this._native.extrudeProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+    }
+
+    /** Apply a versioned subtractive profile extrusion feature spec to a resident shape. */
+    extrudeCutProfileWithSpec(params: ExtrudeCutProfileFeatureParams): ShapeHandle {
+        if (typeof this._native.extrudeCutProfileWithSpec !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support extrudeCutProfileWithSpec');
+        }
+        const profileJson = JSON.stringify(normalizeProfile(params.profile));
+        const specJson = JSON.stringify(normalizeExtrudeProfileSpec(params.spec));
+        return makeHandle(wrap(() => this._native.extrudeCutProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
     }
 
     /**

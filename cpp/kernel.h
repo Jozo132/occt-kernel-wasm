@@ -62,6 +62,12 @@ public:
      */
     uint32_t extrudeProfile(const std::string& profileJson, const std::string& optionsJson);
 
+    /// Apply a structured additive profile extrude feature to a resident shape.
+    uint32_t extrudeProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson);
+
+    /// Apply a structured subtractive profile extrude feature to a resident shape.
+    uint32_t extrudeCutProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson);
+
     /**
      * Revolve a 2-D profile about an arbitrary world-space axis.
      * @param profileJson    JSON serialisation of a profile struct.
@@ -196,6 +202,11 @@ private:
                                     const std::string& entityStatus,
                                     const std::string& identityStatus,
                                     const std::vector<std::string>& warnings);
+    uint32_t performStructuredExtrudeFeature(uint32_t id,
+                                             const std::string& profileJson,
+                                             const std::string& specJson,
+                                             const std::string& operationType,
+                                             int fuseMode);
     const TopoDS_Shape& requireShape(uint32_t id) const;
     std::string requireRevisionId(uint32_t id) const;
 };

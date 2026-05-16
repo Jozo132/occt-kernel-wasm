@@ -115,7 +115,7 @@ export class MockNativeKernel {
             return shape.params.revisionInfo as Record<string, unknown>;
         }
 
-        const unresolved = ['union', 'subtract', 'intersect', 'fillet', 'chamfer'].includes(shape.kind);
+        const unresolved = ['union', 'subtract', 'intersect', 'fillet', 'chamfer', 'extrudeFeature', 'extrudeCutFeature'].includes(shape.kind);
         const retained = shape.kind === 'transform';
         return {
             revisionId: `rev_mock_${id}`,
@@ -321,6 +321,139 @@ export class MockNativeKernel {
         return options;
     }
 
+    private _parseExtrudeSpec(specJson: string): Record<string, unknown> {
+        const spec = JSON.parse(specJson) as Record<string, unknown>;
+        if (spec.schemaVersion !== 1) {
+            throw new KernelError('INVALID_PARAMS', 'extrude spec.schemaVersion must be 1');
+        }
+
+        const allowUnknownFields = spec.allowUnknownFields === true;
+        if (!allowUnknownFields) {
+            const allowedKeys = new Set([
+                'schemaVersion',
+                'allowUnknownFields',
+                'unit',
+                'plane',
+                'direction',
+                'reverseDirection',
+                'draftAngleRadians',
+                'draftAngleDegrees',
+                'extent',
+                'metadata',
+            ]);
+            for (const key of Object.keys(spec)) {
+                if (!allowedKeys.has(key)) {
+                    throw new KernelError('INVALID_PARAMS', JSON.stringify({
+                        phase: 'validation',
+                        operation: 'extrudeProfile',
+                        path: `extrude.${key}`,
+                        reason: 'Unknown field is not allowed for this schema version',
+                        unsupportedFeature: 'unknownField',
+                    }));
+                }
+            }
+        }
+
+        if (spec.unit !== undefined) {
+            const unit = spec.unit as Record<string, unknown>;
+            if (unit.length !== undefined && unit.length !== 'model') {
+                throw new KernelError('INVALID_PARAMS', 'extrude spec.unit.length must be model');
+            }
+            if (unit.angle !== undefined && unit.angle !== 'radians' && unit.angle !== 'degrees') {
+                throw new KernelError('INVALID_PARAMS', 'extrude spec.unit.angle must be radians or degrees');
+            }
+        }
+
+        if (spec.plane !== undefined) {
+            const plane = spec.plane as Record<string, unknown>;
+            if (!isPoint(plane.origin, 3) || !isPoint(plane.normal, 3) || !isPoint(plane.xDirection, 3)) {
+                throw new KernelError('INVALID_PARAMS', 'Plane must include origin, normal, and xDirection');
+            }
+            if (isZeroVector(plane.normal as number[]) || isZeroVector(plane.xDirection as number[])) {
+                throw new KernelError('INVALID_PARAMS', 'Plane vectors must not be zero');
+            }
+        }
+
+        if (spec.direction !== undefined) {
+            if (!isPoint(spec.direction, 3) || isZeroVector(spec.direction as number[])) {
+                throw new KernelError('INVALID_PARAMS', 'extrude spec.direction must be a non-zero 3-element array');
+            }
+        }
+
+        if (spec.reverseDirection !== undefined && typeof spec.reverseDirection !== 'boolean') {
+            throw new KernelError('INVALID_PARAMS', 'extrude spec.reverseDirection must be a boolean');
+        }
+
+        const hasAngleRadians = typeof spec.draftAngleRadians === 'number';
+        const hasAngleDegrees = typeof spec.draftAngleDegrees === 'number';
+        if (hasAngleRadians && hasAngleDegrees) {
+            throw new KernelError('INVALID_PARAMS', 'extrude spec must not specify both draftAngleRadians and draftAngleDegrees');
+        }
+        if (hasAngleRadians && Math.abs(spec.draftAngleRadians as number) >= Math.PI / 2) {
+            throw new KernelError('INVALID_PARAMS', 'extrude spec.draftAngleRadians must be in (-pi/2, pi/2)');
+        }
+        if (hasAngleDegrees && Math.abs(spec.draftAngleDegrees as number) >= 90) {
+            throw new KernelError('INVALID_PARAMS', 'extrude spec.draftAngleDegrees must be in (-90, 90)');
+        }
+
+        const extent = spec.extent as Record<string, unknown> | undefined;
+        if (!extent || typeof extent.type !== 'string') {
+            throw new KernelError('INVALID_PARAMS', 'extrude spec.extent must be provided');
+        }
+
+        const validateSurface = (label: string, surface: Record<string, unknown> | undefined): void => {
+            if (!surface || typeof surface !== 'object') {
+                throw new KernelError('INVALID_PARAMS', `${label} must be an object`);
+            }
+            if (surface.shapeId !== undefined) {
+                if (!isPositiveInteger(surface.shapeId)) {
+                    throw new KernelError('INVALID_PARAMS', `${label}.shapeId must be a positive integer`);
+                }
+                this._require(surface.shapeId as number);
+            }
+            this._validateRef((surface.face ?? {}) as Record<string, unknown>, `${label}.face`);
+        };
+
+        switch (extent.type) {
+            case 'blind':
+                if (typeof extent.distance !== 'number' || !Number.isFinite(extent.distance) || extent.distance <= 0) {
+                    throw new KernelError('INVALID_PARAMS', 'extrude spec.extent.distance must be > 0');
+                }
+                break;
+            case 'upToNext':
+            case 'throughAll':
+                break;
+            case 'upToSurface':
+                validateSurface('extrude spec.extent.surface', extent.surface as Record<string, unknown> | undefined);
+                break;
+            case 'offsetFromSurface':
+                validateSurface('extrude spec.extent.surface', extent.surface as Record<string, unknown> | undefined);
+                if (typeof extent.offset !== 'number' || !Number.isFinite(extent.offset) || extent.offset <= 0) {
+                    throw new KernelError('INVALID_PARAMS', 'extrude spec.extent.offset must be > 0');
+                }
+                break;
+            default:
+                throw new KernelError('INVALID_PARAMS', `extrude spec.extent.type '${extent.type}' is not supported`);
+        }
+
+        if (hasAngleRadians || hasAngleDegrees) {
+            const planeNormal = spec.plane !== undefined ? ((spec.plane as Record<string, unknown>).normal as number[] | undefined) : undefined;
+            const direction = (spec.direction as number[] | undefined) ?? planeNormal;
+            if (direction !== undefined && planeNormal !== undefined) {
+                const cross = [
+                    planeNormal[1] * direction[2] - planeNormal[2] * direction[1],
+                    planeNormal[2] * direction[0] - planeNormal[0] * direction[2],
+                    planeNormal[0] * direction[1] - planeNormal[1] * direction[0],
+                ];
+                if (!isZeroVector(cross)) {
+                    throw new KernelError('INVALID_PARAMS', 'Draft extrusion only supports direction aligned with the sketch plane normal');
+                }
+            }
+        }
+
+        return spec;
+    }
+
     private _parseRevolveOptions(optionsJson: string): Record<string, unknown> {
         const options = JSON.parse(optionsJson) as Record<string, unknown>;
         if (typeof options.angleDegrees !== 'number' || options.angleDegrees <= 0 || options.angleDegrees > 360) {
@@ -370,6 +503,20 @@ export class MockNativeKernel {
         const profile = this._parseProfile(profileJson);
         const options = this._parseExtrudeOptions(optionsJson);
         return this._store('extrude', { profile, options });
+    }
+
+    extrudeProfileWithSpec(id: number, profileJson: string, specJson: string): number {
+        this._require(id);
+        const profile = this._parseProfile(profileJson);
+        const spec = this._parseExtrudeSpec(specJson);
+        return this._store('extrudeFeature', { id, profile, spec });
+    }
+
+    extrudeCutProfileWithSpec(id: number, profileJson: string, specJson: string): number {
+        this._require(id);
+        const profile = this._parseProfile(profileJson);
+        const spec = this._parseExtrudeSpec(specJson);
+        return this._store('extrudeCutFeature', { id, profile, spec });
     }
 
     revolveProfile(profileJson: string, optionsJson: string): number {
@@ -590,6 +737,34 @@ export class MockNativeKernel {
         return JSON.stringify({
             schemaVersion: 1,
             operations: {
+                extrudeProfile: {
+                    schemaVersion: 1,
+                    nativeExact: true,
+                    requiresMeshFallback: false,
+                    supports: {
+                        direction: true,
+                        draft: true,
+                        plane: true,
+                        reverseDirection: true,
+                        endConditions: ['blind', 'upToNext', 'throughAll', 'upToSurface', 'offsetFromSurface'],
+                        surfaceTarget: true,
+                        curvedSurfaceTarget: true,
+                    },
+                },
+                extrudeCutProfile: {
+                    schemaVersion: 1,
+                    nativeExact: true,
+                    requiresMeshFallback: false,
+                    supports: {
+                        direction: true,
+                        draft: true,
+                        plane: true,
+                        reverseDirection: true,
+                        endConditions: ['blind', 'upToNext', 'throughAll', 'upToSurface', 'offsetFromSurface'],
+                        surfaceTarget: true,
+                        curvedSurfaceTarget: true,
+                    },
+                },
                 filletEdges: { schemaVersion: 1, nativeExact: true },
                 chamferEdges: { schemaVersion: 1, nativeExact: true },
                 evaluateEdge: { schemaVersion: 1, nativeExact: true },
@@ -620,6 +795,28 @@ export class MockNativeKernel {
                 operationSchemaV1: true,
                 nativeExactBlendOpsV1: true,
                 exactSubshapeEvaluationV1: true,
+            },
+            extrudeProfile: {
+                schemaVersion: 1,
+                nativeExact: true,
+                direction: true,
+                draft: true,
+                plane: true,
+                reverseDirection: true,
+                endConditions: ['blind', 'upToNext', 'throughAll', 'upToSurface', 'offsetFromSurface'],
+                surfaceTarget: true,
+                curvedSurfaceTarget: true,
+            },
+            extrudeCutProfile: {
+                schemaVersion: 1,
+                nativeExact: true,
+                direction: true,
+                draft: true,
+                plane: true,
+                reverseDirection: true,
+                endConditions: ['blind', 'upToNext', 'throughAll', 'upToSurface', 'offsetFromSurface'],
+                surfaceTarget: true,
+                curvedSurfaceTarget: true,
             },
             fillet: {
                 schemaVersion: 1,

@@ -99,7 +99,7 @@ try {
     $env:EM_CONFIG = "$EMSDK_ROOT\.emscripten"
     $OCCT_VERSION = "V8_0_0"
     $OCCT_REPO = "https://github.com/Open-Cascade-SAS/OCCT.git"
-    $OCCT_TOOLKITS = "TKernel;TKMath;TKG2d;TKG3d;TKGeomBase;TKBRep;TKGeomAlgo;TKTopAlgo;TKPrim;TKBO;TKBool;TKFillet;TKOffset;TKShHealing;TKMesh;TKXSBase;TKDESTEP"
+    $OCCT_TOOLKITS = "TKernel;TKMath;TKG2d;TKG3d;TKGeomBase;TKBRep;TKGeomAlgo;TKTopAlgo;TKPrim;TKBO;TKBool;TKFeat;TKFillet;TKOffset;TKShHealing;TKMesh;TKXSBase;TKDESTEP"
     if ($env:OCCT_WASM_CACHE_ROOT) {
         $OcctCacheRoot = $env:OCCT_WASM_CACHE_ROOT
     }

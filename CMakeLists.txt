@@ -41,6 +41,7 @@ set(OCCT_KERNEL_MINIMAL_OCCT_LIBRARIES
     TKPrim
     TKBO
     TKBool
+    TKFeat
     TKFillet
     TKOffset
     TKShHealing
@@ -93,6 +94,14 @@ if(NOT OpenCASCADE_FOUND)
     )
 endif()
 
+set(OCCT_KERNEL_EXTRA_INCLUDE_DIRS)
+if(DEFINED OCCT_ROOT)
+    set(OCCT_KERNEL_OCCT_BUILD_INCLUDE_DIR "${OCCT_ROOT}/../b/include/opencascade")
+    if(EXISTS "${OCCT_KERNEL_OCCT_BUILD_INCLUDE_DIR}/BRepFeat_MakePrism.hxx")
+        list(APPEND OCCT_KERNEL_EXTRA_INCLUDE_DIRS "${OCCT_KERNEL_OCCT_BUILD_INCLUDE_DIR}")
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # Source lists
 # ---------------------------------------------------------------------------
@@ -128,6 +137,7 @@ if(OCCT_KERNEL_WASM)
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/cpp
             ${OpenCASCADE_INCLUDE_DIR}
+            ${OCCT_KERNEL_EXTRA_INCLUDE_DIRS}
     )
 
     target_link_libraries(occt-kernel
@@ -200,6 +210,7 @@ if(OCCT_KERNEL_NATIVE AND OpenCASCADE_FOUND)
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/cpp
             ${OpenCASCADE_INCLUDE_DIR}
+            ${OCCT_KERNEL_EXTRA_INCLUDE_DIRS}
     )
 
     target_link_libraries(occt-kernel-native

@@ -138,6 +138,49 @@ export interface ExtrudeParams {
     readonly vector?: Vector3;
 }
 
+export interface ExtrudeSurfaceTarget {
+    /** Optional external shape containing the limiting face. Defaults to `shape`. */
+    readonly shape?: ShapeHandle;
+    readonly face: FaceRef;
+}
+
+export type ExtrudeProfileExtent =
+    | { readonly type: 'blind'; readonly distance: number }
+    | { readonly type: 'upToNext' }
+    | { readonly type: 'throughAll' }
+    | { readonly type: 'upToSurface'; readonly surface: ExtrudeSurfaceTarget }
+    | { readonly type: 'offsetFromSurface'; readonly surface: ExtrudeSurfaceTarget; readonly offset: number };
+
+export interface ExtrudeProfileSpec {
+    readonly schemaVersion: 1;
+    readonly allowUnknownFields?: boolean;
+    readonly unit?: { readonly length?: 'model'; readonly angle?: 'radians' | 'degrees' };
+    /** Optional sketch-plane placement for the local 2-D profile. */
+    readonly plane?: PlaneFrame;
+    /** Explicit extrusion direction. Defaults to plane normal / +Z. */
+    readonly direction?: Vector3;
+    /** Flip the resolved extrusion direction before applying the feature. */
+    readonly reverseDirection?: boolean;
+    /** Optional draft angle in radians. Positive or negative values are allowed. */
+    readonly draftAngleRadians?: number;
+    /** Optional draft angle in degrees. Positive or negative values are allowed. */
+    readonly draftAngleDegrees?: number;
+    readonly extent: ExtrudeProfileExtent;
+    readonly metadata?: Record<string, unknown>;
+}
+
+export interface ExtrudeProfileFeatureParams {
+    readonly shape: ShapeHandle;
+    readonly profile: Profile;
+    readonly spec: ExtrudeProfileSpec;
+}
+
+export interface ExtrudeCutProfileFeatureParams {
+    readonly shape: ShapeHandle;
+    readonly profile: Profile;
+    readonly spec: ExtrudeProfileSpec;
+}
+
 export interface RevolveParams {
     /** 2-D profile to revolve. */
     readonly profile: Profile;
@@ -656,6 +699,28 @@ export interface KernelCapabilities {
         readonly operationSchemaV1?: boolean;
         readonly nativeExactBlendOpsV1?: boolean;
         readonly exactSubshapeEvaluationV1?: boolean;
+    };
+    readonly extrudeProfile?: {
+        readonly schemaVersion: number;
+        readonly nativeExact: boolean;
+        readonly direction: boolean;
+        readonly draft: boolean;
+        readonly plane: boolean;
+        readonly reverseDirection: boolean;
+        readonly endConditions: readonly string[];
+        readonly surfaceTarget: boolean;
+        readonly curvedSurfaceTarget: boolean;
+    };
+    readonly extrudeCutProfile?: {
+        readonly schemaVersion: number;
+        readonly nativeExact: boolean;
+        readonly direction: boolean;
+        readonly draft: boolean;
+        readonly plane: boolean;
+        readonly reverseDirection: boolean;
+        readonly endConditions: readonly string[];
+        readonly surfaceTarget: boolean;
+        readonly curvedSurfaceTarget: boolean;
     };
     readonly fillet?: {
         readonly schemaVersion: number;

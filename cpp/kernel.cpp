@@ -34,6 +34,8 @@
 // Prism / Revolution
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepFeat_MakePrism.hxx>
+#include <BRepFeat_MakeDPrism.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax3.hxx>
@@ -159,6 +161,32 @@ struct ExtrudeOptions {
     bool hasVector = false;
     gp_Vec vector = gp_Vec(0.0, 0.0, 0.0);
     PlaneFrame plane;
+};
+
+enum class StructuredExtrudeExtentMode {
+    Blind,
+    UpToNext,
+    ThroughAll,
+    UpToSurface,
+    OffsetFromSurface,
+};
+
+struct StructuredExtrudeSurfaceTarget {
+    bool hasShapeId = false;
+    uint32_t shapeId = 0;
+    mini_json::Value faceRef = mini_json::Value::makeObject();
+};
+
+struct StructuredExtrudeSpec {
+    PlaneFrame plane;
+    gp_Dir direction = gp_Dir(0.0, 0.0, 1.0);
+    bool hasDraftAngle = false;
+    double draftAngleRadians = 0.0;
+    StructuredExtrudeExtentMode extentMode = StructuredExtrudeExtentMode::Blind;
+    double distance = 0.0;
+    double offset = 0.0;
+    bool hasSurfaceTarget = false;
+    StructuredExtrudeSurfaceTarget surfaceTarget;
 };
 
 struct RevolveOptions {
@@ -896,6 +924,175 @@ double optionalAngleRadians(const mini_json::Value& object,
     return 0.0;
 }
 
+int requirePositiveIntMember(const mini_json::Value& object,
+                             const std::string& key,
+                             const std::string& operation,
+                             const std::string& path) {
+    if (!hasMember(object, key)) {
+        throwStructuredValidation(operation, path, "Required positive integer is missing");
+    }
+    const double value = optionalNumberMember(object, key, 0.0);
+    if (!std::isfinite(value) || std::floor(value) != value || value <= 0.0) {
+        throwStructuredValidation(operation, path, "Value must be a positive integer");
+    }
+    return static_cast<int>(value);
+}
+
+double optionalSignedAngleRadians(const mini_json::Value& object,
+                                  const std::string& operation,
+                                  const std::string& path,
+                                  bool& hasValue) {
+    const bool hasRadians = hasMember(object, "draftAngleRadians");
+    const bool hasDegrees = hasMember(object, "draftAngleDegrees");
+    if (hasRadians && hasDegrees) {
+        throwStructuredValidation(operation,
+                                  path,
+                                  "Specify only one of draftAngleRadians or draftAngleDegrees");
+    }
+    if (hasRadians) {
+        const double angle = optionalNumberMember(object, "draftAngleRadians", 0.0);
+        if (!std::isfinite(angle) || std::abs(angle) >= (M_PI / 2.0)) {
+            throwStructuredValidation(operation,
+                                      path + ".draftAngleRadians",
+                                      "draftAngleRadians must be finite and in (-pi/2, pi/2)");
+        }
+        hasValue = true;
+        return angle;
+    }
+    if (hasDegrees) {
+        const double angle = optionalNumberMember(object, "draftAngleDegrees", 0.0);
+        if (!std::isfinite(angle) || std::abs(angle) >= 90.0) {
+            throwStructuredValidation(operation,
+                                      path + ".draftAngleDegrees",
+                                      "draftAngleDegrees must be finite and in (-90, 90)");
+        }
+        hasValue = true;
+        return angle * M_PI / 180.0;
+    }
+    hasValue = false;
+    return 0.0;
+}
+
+StructuredExtrudeSurfaceTarget parseStructuredExtrudeSurfaceTarget(const mini_json::Value& value,
+                                                                   bool allowUnknownFields,
+                                                                   const std::string& operation,
+                                                                   const std::string& path) {
+    const mini_json::Value& surface = mini_json::requireObject(value, path);
+    rejectUnknownFields(surface, { "shapeId", "face" }, operation, path, allowUnknownFields);
+
+    StructuredExtrudeSurfaceTarget target;
+    if (hasMember(surface, "shapeId")) {
+        target.hasShapeId = true;
+        target.shapeId = static_cast<uint32_t>(requirePositiveIntMember(surface,
+                                                                        "shapeId",
+                                                                        operation,
+                                                                        path + ".shapeId"));
+    }
+    target.faceRef = mini_json::requireObject(mini_json::requireMember(surface, "face", path), path + ".face");
+    return target;
+}
+
+StructuredExtrudeSpec parseStructuredExtrudeSpec(const std::string& specJson,
+                                                 const std::string& operation,
+                                                 const std::string& pathRoot) {
+    const mini_json::Value root = mini_json::requireObject(mini_json::parse(specJson), pathRoot + " spec");
+    requireSchemaVersion(root, operation);
+    const bool allowUnknownFields = optionalBoolMember(root, "allowUnknownFields", false);
+    rejectUnknownFields(root,
+                        { "schemaVersion", "allowUnknownFields", "unit", "plane", "direction", "reverseDirection", "draftAngleRadians", "draftAngleDegrees", "extent", "metadata" },
+                        operation,
+                        pathRoot,
+                        allowUnknownFields);
+
+    if (const mini_json::Value* unitValue = root.get("unit")) {
+        const mini_json::Value& unit = mini_json::requireObject(*unitValue, pathRoot + ".unit");
+        rejectUnknownFields(unit, { "length", "angle" }, operation, pathRoot + ".unit", allowUnknownFields);
+        if (hasMember(unit, "length")) {
+            const std::string lengthUnit = optionalStringMember(unit, "length");
+            if (lengthUnit != "model") {
+                throwStructuredValidation(operation,
+                                          pathRoot + ".unit.length",
+                                          "Only model length units are supported");
+            }
+        }
+        if (hasMember(unit, "angle")) {
+            const std::string angleUnit = optionalStringMember(unit, "angle");
+            if (angleUnit != "radians" && angleUnit != "degrees") {
+                throwStructuredValidation(operation,
+                                          pathRoot + ".unit.angle",
+                                          "Angle unit must be radians or degrees");
+            }
+        }
+    }
+
+    StructuredExtrudeSpec spec;
+    if (const mini_json::Value* planeValue = root.get("plane")) {
+        spec.plane = parsePlaneFrame(mini_json::requireObject(*planeValue, pathRoot + ".plane"));
+    }
+
+    const gp_Dir sketchNormal = spec.plane.hasValue ? spec.plane.normal : gp_Dir(0.0, 0.0, 1.0);
+    if (const mini_json::Value* directionValue = root.get("direction")) {
+        spec.direction = parseDirection3(*directionValue, pathRoot + ".direction");
+    } else {
+        spec.direction = sketchNormal;
+    }
+    if (optionalBoolMember(root, "reverseDirection", false)) {
+        spec.direction.Reverse();
+    }
+
+    bool hasDraftAngle = false;
+    spec.draftAngleRadians = optionalSignedAngleRadians(root, operation, pathRoot, hasDraftAngle);
+    spec.hasDraftAngle = hasDraftAngle && std::abs(spec.draftAngleRadians) > 1.0e-12;
+    if (spec.hasDraftAngle && std::abs(spec.direction.Dot(sketchNormal)) < 1.0 - 1.0e-9) {
+        throwStructuredValidation(operation,
+                                  pathRoot + ".direction",
+                                  "Draft extrusion requires direction aligned with the sketch plane normal");
+    }
+
+    const mini_json::Value& extent = mini_json::requireObject(mini_json::requireMember(root, "extent", pathRoot), pathRoot + ".extent");
+    const std::string extentType = optionalStringMember(extent, "type");
+    if (extentType.empty()) {
+        throwStructuredValidation(operation,
+                                  pathRoot + ".extent.type",
+                                  "Extent type is required");
+    }
+
+    if (extentType == "blind") {
+        rejectUnknownFields(extent, { "type", "distance" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredExtrudeExtentMode::Blind;
+        spec.distance = requirePositiveMember(extent, "distance", operation, pathRoot + ".extent.distance");
+    } else if (extentType == "upToNext") {
+        rejectUnknownFields(extent, { "type" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredExtrudeExtentMode::UpToNext;
+    } else if (extentType == "throughAll") {
+        rejectUnknownFields(extent, { "type" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredExtrudeExtentMode::ThroughAll;
+    } else if (extentType == "upToSurface") {
+        rejectUnknownFields(extent, { "type", "surface" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredExtrudeExtentMode::UpToSurface;
+        spec.hasSurfaceTarget = true;
+        spec.surfaceTarget = parseStructuredExtrudeSurfaceTarget(mini_json::requireMember(extent, "surface", pathRoot + ".extent"),
+                                                                 allowUnknownFields,
+                                                                 operation,
+                                                                 pathRoot + ".extent.surface");
+    } else if (extentType == "offsetFromSurface") {
+        rejectUnknownFields(extent, { "type", "surface", "offset" }, operation, pathRoot + ".extent", allowUnknownFields);
+        spec.extentMode = StructuredExtrudeExtentMode::OffsetFromSurface;
+        spec.hasSurfaceTarget = true;
+        spec.surfaceTarget = parseStructuredExtrudeSurfaceTarget(mini_json::requireMember(extent, "surface", pathRoot + ".extent"),
+                                                                 allowUnknownFields,
+                                                                 operation,
+                                                                 pathRoot + ".extent.surface");
+        spec.offset = requirePositiveMember(extent, "offset", operation, pathRoot + ".extent.offset");
+    } else {
+        throwStructuredValidation(operation,
+                                  pathRoot + ".extent.type",
+                                  "Unsupported extent type");
+    }
+
+    return spec;
+}
+
 std::string objectToStableSignature(const mini_json::Value& value) {
     if (value.kind == mini_json::Value::Kind::Null) return "null";
     if (value.kind == mini_json::Value::Kind::Bool) return value.boolean ? "true" : "false";
@@ -1056,6 +1253,42 @@ void appendEntityRefJson(std::ostringstream& out, const ResolvedFaceRef& face) {
     out << "\"topoId\":" << face.topoId << ",";
     out << "\"stableHash\":"; appendJsonString(out, face.stableHash);
     out << "}";
+}
+
+template <typename TFeature>
+TopoDS_Shape performStructuredExtrudeExtent(TFeature& feature,
+                                            const StructuredExtrudeSpec& spec,
+                                            const TopoDS_Shape& baseShape,
+                                            const TopoDS_Shape* surfaceLimitShape,
+                                            const std::string& operation) {
+    switch (spec.extentMode) {
+    case StructuredExtrudeExtentMode::Blind:
+        feature.Perform(spec.distance);
+        break;
+    case StructuredExtrudeExtentMode::UpToNext:
+        feature.Perform(baseShape);
+        break;
+    case StructuredExtrudeExtentMode::ThroughAll:
+        feature.PerformUntilEnd();
+        break;
+    case StructuredExtrudeExtentMode::UpToSurface:
+        if (surfaceLimitShape == nullptr) {
+            throwStructuredValidation(operation, "extent.surface", "Surface limit is required");
+        }
+        feature.Perform(*surfaceLimitShape);
+        break;
+    case StructuredExtrudeExtentMode::OffsetFromSurface:
+        if (surfaceLimitShape == nullptr) {
+            throwStructuredValidation(operation, "extent.surface", "Surface limit is required");
+        }
+        feature.PerformUntilHeight(*surfaceLimitShape, spec.offset);
+        break;
+    }
+
+    if (!feature.IsDone() || feature.Shape().IsNull()) {
+        throwStructuredOperationError(operation, "Structured extrusion feature failed");
+    }
+    return feature.Shape();
 }
 
 ChFi3d_FilletShape parseFilletShape(const std::string& value, const std::string& operation, const std::string& path) {
@@ -1864,6 +2097,94 @@ uint32_t OcctKernel::extrudeProfile(const std::string& profileJson, const std::s
                                       "generated",
                                       "generated",
                                       {});
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return 0;
+}
+
+uint32_t OcctKernel::performStructuredExtrudeFeature(uint32_t id,
+                                                     const std::string& profileJson,
+                                                     const std::string& specJson,
+                                                     const std::string& operationType,
+                                                     int fuseMode) {
+    const std::string pathRoot = operationType == "extrudeCutProfile" ? "extrudeCut" : "extrude";
+    auto sourceIt = _impl->records.find(id);
+    if (sourceIt == _impl->records.end()) {
+        throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+    }
+
+    const StructuredExtrudeSpec spec = parseStructuredExtrudeSpec(specJson, operationType, pathRoot);
+    const TopoDS_Shape& baseShape = sourceIt->second.shape;
+    const RevisionMetadata* baseRevision = &sourceIt->second.revision;
+    TopoDS_Face profileFace = placeProfileFace(buildFaceFromProfile(profileJson), spec.plane);
+
+    TopoDS_Shape surfaceLimitShape;
+    const TopoDS_Shape* surfaceLimitShapePtr = nullptr;
+    if (spec.hasSurfaceTarget) {
+        const TopoDS_Shape* targetShape = &baseShape;
+        const RevisionMetadata* targetRevision = baseRevision;
+        if (spec.surfaceTarget.hasShapeId) {
+            auto targetIt = _impl->records.find(spec.surfaceTarget.shapeId);
+            if (targetIt == _impl->records.end()) {
+                throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(spec.surfaceTarget.shapeId));
+            }
+            targetShape = &targetIt->second.shape;
+            targetRevision = &targetIt->second.revision;
+        }
+        const ResolvedFaceRef targetFace = resolveFaceRef(*targetShape,
+                                                          targetRevision,
+                                                          spec.surfaceTarget.faceRef,
+                                                          operationType,
+                                                          pathRoot + ".extent.surface.face");
+        surfaceLimitShape = targetFace.face;
+        surfaceLimitShapePtr = &surfaceLimitShape;
+    }
+
+    TopoDS_Shape resultShape;
+    if (spec.hasDraftAngle) {
+        BRepFeat_MakeDPrism feature;
+        feature.Init(baseShape, profileFace, profileFace, spec.draftAngleRadians, fuseMode, true);
+        resultShape = performStructuredExtrudeExtent(feature,
+                                                     spec,
+                                                     baseShape,
+                                                     surfaceLimitShapePtr,
+                                                     operationType);
+    } else {
+        BRepFeat_MakePrism feature;
+        feature.Init(baseShape, profileFace, profileFace, spec.direction, fuseMode, true);
+        resultShape = performStructuredExtrudeExtent(feature,
+                                                     spec,
+                                                     baseShape,
+                                                     surfaceLimitShapePtr,
+                                                     operationType);
+    }
+
+    return storeShapeWithMetadata(resultShape,
+                                  operationType,
+                                  "source=" + baseRevision->revisionId + ";" + profileJson + "|" + specJson,
+                                  { baseRevision->revisionId },
+                                  "unresolved",
+                                  "unresolved",
+                                  { "Structured extrude feature lineage is not yet proven; generated/modified/deleted identity is reported as unresolved" });
+}
+
+uint32_t OcctKernel::extrudeProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson) {
+    try {
+        return performStructuredExtrudeFeature(id, profileJson, specJson, "extrudeProfile", 1);
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return 0;
+}
+
+uint32_t OcctKernel::extrudeCutProfileWithSpec(uint32_t id, const std::string& profileJson, const std::string& specJson) {
+    try {
+        return performStructuredExtrudeFeature(id, profileJson, specJson, "extrudeCutProfile", 0);
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
@@ -3013,6 +3334,8 @@ std::string OcctKernel::getOperationSchema() const {
     return "{"
         "\"schemaVersion\":1,"
         "\"operations\":{"
+        "\"extrudeProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"direction\":true,\"draft\":true,\"plane\":true,\"reverseDirection\":true,\"endConditions\":[\"blind\",\"upToNext\",\"throughAll\",\"upToSurface\",\"offsetFromSurface\"],\"surfaceTarget\":true,\"curvedSurfaceTarget\":true}},"
+        "\"extrudeCutProfile\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"direction\":true,\"draft\":true,\"plane\":true,\"reverseDirection\":true,\"endConditions\":[\"blind\",\"upToNext\",\"throughAll\",\"upToSurface\",\"offsetFromSurface\"],\"surfaceTarget\":true,\"curvedSurfaceTarget\":true}},"
         "\"filletEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"constantRadius\":true,\"startEndRadius\":true,\"stationRadii\":true,\"lawRadius\":[\"constant\",\"linear\"],\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"blendShape\":[\"rational\",\"quasiAngular\",\"polynomial\"],\"continuity\":[\"C0\",\"C1\",\"C2\"],\"overflowModes\":[\"fail\"]}},"
         "\"chamferEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"symmetric\":true,\"twoDistance\":true,\"distanceAngle\":true,\"referenceFace\":true,\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"overflowModes\":[\"fail\"]}},"
         "\"evaluateEdge\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
@@ -3043,6 +3366,28 @@ std::string OcctKernel::getCapabilities() const {
         "\"operationSchemaV1\":true,"
         "\"nativeExactBlendOpsV1\":true,"
         "\"exactSubshapeEvaluationV1\":true"
+        "},"
+        "\"extrudeProfile\":{"
+        "\"schemaVersion\":1,"
+        "\"nativeExact\":true,"
+        "\"direction\":true,"
+        "\"draft\":true,"
+        "\"plane\":true,"
+        "\"reverseDirection\":true,"
+        "\"endConditions\":[\"blind\",\"upToNext\",\"throughAll\",\"upToSurface\",\"offsetFromSurface\"],"
+        "\"surfaceTarget\":true,"
+        "\"curvedSurfaceTarget\":true"
+        "},"
+        "\"extrudeCutProfile\":{"
+        "\"schemaVersion\":1,"
+        "\"nativeExact\":true,"
+        "\"direction\":true,"
+        "\"draft\":true,"
+        "\"plane\":true,"
+        "\"reverseDirection\":true,"
+        "\"endConditions\":[\"blind\",\"upToNext\",\"throughAll\",\"upToSurface\",\"offsetFromSurface\"],"
+        "\"surfaceTarget\":true,"
+        "\"curvedSurfaceTarget\":true"
         "},"
         "\"fillet\":{"
         "\"schemaVersion\":1,"

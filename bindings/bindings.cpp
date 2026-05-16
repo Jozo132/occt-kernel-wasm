@@ -26,6 +26,8 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
 
         // Sketch-based features
         .function("extrudeProfile", &OcctKernel::extrudeProfile)
+        .function("extrudeProfileWithSpec", &OcctKernel::extrudeProfileWithSpec)
+        .function("extrudeCutProfileWithSpec", &OcctKernel::extrudeCutProfileWithSpec)
         .function("revolveProfile", &OcctKernel::revolveProfile)
 
         // Booleans

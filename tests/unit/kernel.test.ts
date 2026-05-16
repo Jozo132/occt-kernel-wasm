@@ -486,6 +486,91 @@ describe('structured blend operations', () => {
     });
 });
 
+describe('structured profile extrusion operations', () => {
+    const squareProfile = {
+        segments: [
+            { type: 'line' as const, start: [0, 0] as [number, number], end: [10, 0] as [number, number] },
+            { type: 'line' as const, start: [10, 0] as [number, number], end: [10, 10] as [number, number] },
+            { type: 'line' as const, start: [10, 10] as [number, number], end: [0, 10] as [number, number] },
+            { type: 'line' as const, start: [0, 10] as [number, number], end: [0, 0] as [number, number] },
+        ],
+    };
+
+    it('applies a drafted additive extrude feature from a versioned spec', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const result = k.extrudeProfileWithSpec({
+            shape: box,
+            profile: squareProfile,
+            spec: {
+                schemaVersion: 1,
+                direction: [0, 0, 1],
+                reverseDirection: true,
+                draftAngleDegrees: -3,
+                plane: {
+                    origin: [0, 0, 5],
+                    normal: [0, 0, 1],
+                    xDirection: [1, 0, 0],
+                },
+                extent: {
+                    type: 'blind',
+                    distance: 6,
+                },
+            },
+        });
+
+        expect(result.id).toBeGreaterThan(0);
+        expect(result.id).not.toBe(box.id);
+    });
+
+    it('cuts a base shape up to an offset from a referenced surface', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const target = k.createBox({ dx: 20, dy: 20, dz: 20 });
+        const result = k.extrudeCutProfileWithSpec({
+            shape: box,
+            profile: squareProfile,
+            spec: {
+                schemaVersion: 1,
+                plane: {
+                    origin: [0, 0, 0],
+                    normal: [0, 0, 1],
+                    xDirection: [1, 0, 0],
+                },
+                extent: {
+                    type: 'offsetFromSurface',
+                    offset: 0.5,
+                    surface: {
+                        shape: target,
+                        face: { topoId: 1 },
+                    },
+                },
+            },
+        });
+
+        expect(result.id).toBeGreaterThan(0);
+        expect(result.id).not.toBe(box.id);
+    });
+
+    it('throws when both draft angle unit fields are provided in a structured spec', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        expect(() => k.extrudeProfileWithSpec({
+            shape: box,
+            profile: squareProfile,
+            spec: {
+                schemaVersion: 1,
+                draftAngleRadians: 0.1,
+                draftAngleDegrees: 5,
+                extent: {
+                    type: 'throughAll',
+                },
+            },
+        })).toThrow(KernelError);
+    });
+});
+
 describe('exact subshape evaluation APIs', () => {
     it('evaluates, samples, and describes an edge without tessellation', () => {
         const k = makeKernel();
@@ -571,6 +656,9 @@ describe('getCapabilities', () => {
         expect(capabilities.stableNamingV1).toBe(false);
         expect(capabilities.checkpointV1).toBe(true);
         expect(capabilities.operations?.nativeExactBlendOpsV1).toBe(true);
+        expect(capabilities.extrudeProfile?.draft).toBe(true);
+        expect(capabilities.extrudeProfile?.endConditions).toContain('upToSurface');
+        expect(capabilities.extrudeCutProfile?.curvedSurfaceTarget).toBe(true);
         expect(capabilities.fillet?.stationRadii).toBe(true);
         expect(capabilities.fillet?.partialEdges).toBe(false);
         expect(capabilities.chamfer?.distanceAngle).toBe(true);
@@ -582,6 +670,8 @@ describe('getCapabilities', () => {
         const schema = k.getOperationSchema();
 
         expect(schema.schemaVersion).toBe(1);
+        expect(schema.operations.extrudeProfile).toBeDefined();
+        expect(schema.operations.extrudeCutProfile).toBeDefined();
         expect(schema.operations.filletEdges).toBeDefined();
         expect(schema.operations.evaluateFace).toBeDefined();
     });

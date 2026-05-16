@@ -46,7 +46,7 @@ trap print_elapsed_time EXIT
 OCCT_VERSION="V8_0_0"
 OCCT_REPO="https://github.com/Open-Cascade-SAS/OCCT.git"
 OCCT_TAG="${OCCT_VERSION}"
-OCCT_TOOLKITS="TKernel;TKMath;TKG2d;TKG3d;TKGeomBase;TKBRep;TKGeomAlgo;TKTopAlgo;TKPrim;TKBO;TKBool;TKFillet;TKOffset;TKShHealing;TKMesh;TKXSBase;TKDESTEP"
+OCCT_TOOLKITS="TKernel;TKMath;TKG2d;TKG3d;TKGeomBase;TKBRep;TKGeomAlgo;TKTopAlgo;TKPrim;TKBO;TKBool;TKFeat;TKFillet;TKOffset;TKShHealing;TKMesh;TKXSBase;TKDESTEP"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
