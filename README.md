@@ -22,9 +22,11 @@ It is designed to be consumed by modelling applications focused on SolidWorks-li
 | Box / Cylinder / Sphere       | ✅     |
 | Sketch extrusion               | ✅     |
 | Sketch revolution              | ✅     |
+| Sketch sweep / loft            | ✅     |
 | Boolean union / subtract / intersect | ✅ |
 | Fillet / chamfer               | ✅     |
 | Structured native blend specs  | ✅     |
+| Structured sketch feature specs | ✅    |
 | Exact edge/face interrogation  | ✅     |
 | Topology query (faces/edges/vertices/bbox) | ✅ |
 | Validity check                | ✅     |
@@ -144,6 +146,255 @@ B-spline segments (non-rational, non-periodic):
 }
 ```
 
+### Structured sketch feature specs
+
+The last three feature commits added versioned CAD-style feature APIs on top of the legacy sketch helpers. Use these methods when you need exact OCCT feature behavior, richer end conditions, native feature lineage, and machine-readable capability discovery through `getCapabilities()` / `getOperationSchema()`.
+
+Structured profile extrude and extrude cut:
+
+```ts
+const base = kernel.createBox({ dx: 80, dy: 60, dz: 20 });
+
+const bossProfile = {
+    segments: [
+        { type: 'line', start: [0, 0], end: [24, 0] },
+        { type: 'line', start: [24, 0], end: [24, 18] },
+        { type: 'line', start: [24, 18], end: [0, 18] },
+        { type: 'line', start: [0, 18], end: [0, 0] },
+    ],
+};
+
+const boss = kernel.extrudeProfileWithSpec({
+    shape: base,
+    profile: bossProfile,
+    spec: {
+        schemaVersion: 1,
+        plane: {
+            origin: [20, 20, 20],
+            normal: [0, 0, 1],
+            xDirection: [1, 0, 0],
+        },
+        draftAngleDegrees: 2,
+        extent: {
+            type: 'blind',
+            distance: 16,
+        },
+    },
+});
+
+const topFace = kernel.getTopology(boss).faces?.[0];
+
+const pocket = kernel.extrudeCutProfileWithSpec({
+    shape: boss,
+    profile: {
+        segments: [
+            { type: 'line', start: [4, 4], end: [20, 4] },
+            { type: 'line', start: [20, 4], end: [20, 14] },
+            { type: 'line', start: [20, 14], end: [4, 14] },
+            { type: 'line', start: [4, 14], end: [4, 4] },
+        ],
+    },
+    spec: {
+        schemaVersion: 1,
+        plane: {
+            origin: [20, 20, 20],
+            normal: [0, 0, 1],
+            xDirection: [1, 0, 0],
+        },
+        extent: {
+            type: 'offsetFromSurface',
+            surface: { face: { topoId: topFace?.id ?? 1 } },
+            offset: 3,
+        },
+    },
+});
+```
+
+`extrudeProfileWithSpec` supports draft plus blind, `upToNext`, `throughAll`, `upToSurface`, and `offsetFromSurface` end conditions. The subtractive path is exposed as `extrudeCutProfileWithSpec`.
+
+Structured profile revolve and revolve cut:
+
+```ts
+const revolveResult = kernel.revolveProfileWithSpec({
+    shape: base,
+    profile: {
+        segments: [
+            { type: 'line', start: [0, 0], end: [8, 0] },
+            { type: 'line', start: [8, 0], end: [8, 14] },
+            { type: 'line', start: [8, 14], end: [0, 14] },
+            { type: 'line', start: [0, 14], end: [0, 0] },
+        ],
+    },
+    spec: {
+        schemaVersion: 1,
+        plane: {
+            origin: [0, 30, 0],
+            normal: [0, -1, 0],
+            xDirection: [1, 0, 0],
+        },
+        axisOrigin: [0, 30, 0],
+        axisDirection: [0, 0, 1],
+        extent: {
+            type: 'angle',
+            angleDegrees: 225,
+        },
+    },
+});
+
+const revolveCut = kernel.revolveProfileWithSpec({
+    shape: revolveResult,
+    cut: true,
+    profile: {
+        segments: [
+            { type: 'line', start: [0, 2], end: [5, 2] },
+            { type: 'line', start: [5, 2], end: [5, 10] },
+            { type: 'line', start: [5, 10], end: [0, 10] },
+            { type: 'line', start: [0, 10], end: [0, 2] },
+        ],
+    },
+    spec: {
+        schemaVersion: 1,
+        plane: {
+            origin: [0, 30, 0],
+            normal: [0, -1, 0],
+            xDirection: [1, 0, 0],
+        },
+        axisOrigin: [0, 30, 0],
+        axisDirection: [0, 0, 1],
+        extent: {
+            type: 'throughAll',
+        },
+    },
+});
+```
+
+`revolveProfileWithSpec` supports additive and subtractive revolve through `cut?: boolean`, plus angle, `upToSurface`, `fromSurfaceToSurface`, `throughAll`, and `upToSurfaceAtAngle` extents. If you prefer separate calls, `revolveCutProfileWithSpec` remains available too.
+
+Structured sweep and loft:
+
+```ts
+const path = {
+    segments: [
+        { type: 'line', start: [40, 30, 20], end: [40, 30, 50] },
+    ],
+};
+
+const sweep = kernel.sweepProfileWithSpec({
+    shape: pocket,
+    profile: {
+        segments: [
+            { type: 'line', start: [-4, -4], end: [4, -4] },
+            { type: 'line', start: [4, -4], end: [4, 4] },
+            { type: 'line', start: [4, 4], end: [-4, 4] },
+            { type: 'line', start: [-4, 4], end: [-4, -4] },
+        ],
+    },
+    spec: {
+        schemaVersion: 1,
+        plane: {
+            origin: [40, 30, 20],
+            normal: [0, 0, 1],
+            xDirection: [1, 0, 0],
+        },
+        spine: path,
+        trihedronMode: { type: 'discrete' },
+        sectionWithCorrection: true,
+        solid: true,
+        transitionMode: 'roundCorner',
+    },
+});
+
+const loft = kernel.loftWithSpec({
+    shape: sweep,
+    sections: [
+        {
+            type: 'profile',
+            profile: {
+                segments: [
+                    { type: 'line', start: [-6, -6], end: [6, -6] },
+                    { type: 'line', start: [6, -6], end: [6, 6] },
+                    { type: 'line', start: [6, 6], end: [-6, 6] },
+                    { type: 'line', start: [-6, 6], end: [-6, -6] },
+                ],
+            },
+            plane: {
+                origin: [60, 20, 20],
+                normal: [0, 0, 1],
+                xDirection: [1, 0, 0],
+            },
+        },
+        {
+            type: 'wire',
+            wire: {
+                segments: [
+                    { type: 'line', start: [56, 16, 34], end: [64, 16, 34] },
+                    { type: 'line', start: [64, 16, 34], end: [64, 24, 34] },
+                    { type: 'line', start: [64, 24, 34], end: [56, 24, 34] },
+                    { type: 'line', start: [56, 24, 34], end: [56, 16, 34] },
+                ],
+            },
+        },
+        {
+            type: 'point',
+            point: [60, 20, 46],
+        },
+    ],
+    spec: {
+        schemaVersion: 1,
+        solid: true,
+        smoothing: true,
+        parametrization: 'centripetal',
+        continuity: 'C1',
+    },
+});
+
+const loftCut = kernel.loftWithSpec({
+    shape: loft,
+    cut: true,
+    sections: [
+        {
+            type: 'profile',
+            profile: {
+                segments: [
+                    { type: 'line', start: [-5, -5], end: [5, -5] },
+                    { type: 'line', start: [5, -5], end: [5, 5] },
+                    { type: 'line', start: [5, 5], end: [-5, 5] },
+                    { type: 'line', start: [-5, 5], end: [-5, -5] },
+                ],
+            },
+            plane: {
+                origin: [15, 15, -1],
+                normal: [0, 0, 1],
+                xDirection: [1, 0, 0],
+            },
+        },
+        {
+            type: 'profile',
+            profile: {
+                segments: [
+                    { type: 'line', start: [-3, -3], end: [3, -3] },
+                    { type: 'line', start: [3, -3], end: [3, 3] },
+                    { type: 'line', start: [3, 3], end: [-3, 3] },
+                    { type: 'line', start: [-3, 3], end: [-3, -3] },
+                ],
+            },
+            plane: {
+                origin: [15, 15, 21],
+                normal: [0, 0, 1],
+                xDirection: [1, 0, 0],
+            },
+        },
+    ],
+    spec: {
+        schemaVersion: 1,
+        solid: true,
+        ruled: true,
+    },
+});
+```
+
+`sweepProfileWithSpec` uses `cut?: boolean` for additive vs subtractive sweep and supports spine wires, trihedron modes, solid output, transition modes, tolerances, and continuity controls. `loftWithSpec` accepts `profile`, `wire`, and `point` sections plus `cut?: boolean`; profile sections must be single-wire closed loops, matching the native OCCT builder restriction enforced by the wrapper.
+
 ### Boolean operations
 
 ```ts
@@ -250,8 +501,9 @@ const capabilities = kernel.getCapabilities();
 // fillets/chamfers, and healed imports is proven beyond geometry-derived ids.
 
 const schema = kernel.getOperationSchema();
-// Versioned machine-readable operation contracts for structured fillet,
-// chamfer, evaluateEdge, sampleEdge, getEdgeCurve, and evaluateFace.
+// Versioned machine-readable operation contracts for structured extrude,
+// revolve, sweep, loft, fillet, chamfer, evaluateEdge, sampleEdge,
+// getEdgeCurve, and evaluateFace.
 ```
 
 ### Revision history, remap, and checkpoints

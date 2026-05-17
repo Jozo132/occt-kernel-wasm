@@ -19,6 +19,7 @@
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS.hxx>
 #include <BRep_Builder.hxx>
+#include <BRepLib.hxx>
 #include <BRepTools.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
@@ -4458,6 +4459,7 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
 
         BRepMesh_IncrementalMesh mesh(shape, linearDeflection, false, angularDeflection);
         mesh.Perform();
+        BRepLib::EnsureNormalConsistency(shape);
 
         ShapeMap faceMap, edgeMap;
         TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
