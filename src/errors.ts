@@ -4,7 +4,9 @@
 
 export type KernelErrorCode =
     | 'INVALID_HANDLE'
+    | 'SESSION_MISMATCH'
     | 'INVALID_PARAMS'
+    | 'INVALID_CHECKPOINT'
     | 'OPERATION_FAILED'
     | 'IMPORT_FAILED'
     | 'EXPORT_FAILED'

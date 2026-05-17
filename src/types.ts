@@ -11,6 +11,21 @@
 /** Opaque reference to a shape held inside the OCCT kernel. */
 export interface ShapeHandle {
     readonly id: number;
+    /** Resident handles are scoped to one kernel session. */
+    readonly sessionId: string;
+}
+
+export interface KernelVersionInfo {
+    readonly libraryVersion: string;
+    readonly apiVersion: number;
+    readonly kernelVersion: string;
+    readonly kernelVersionMajor: number;
+    readonly kernelVersionMinor: number;
+    readonly kernelVersionMaintenance: number;
+    readonly checkpointSchemaVersion: number;
+    readonly operationSchemaVersion: number;
+    readonly sessionId: string;
+    readonly supportedRuntimes: readonly ('browser' | 'worker' | 'node')[];
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +728,10 @@ export interface TopologyResult {
     readonly topologyHash?: string;
     readonly historySchemaVersion?: number;
     readonly createdFromCheckpoint?: boolean;
+    readonly shapeType?: string;
+    readonly solidCount?: number;
+    readonly shellCount?: number;
+    readonly wireCount?: number;
     readonly faceCount: number;
     readonly edgeCount: number;
     readonly vertexCount: number;
@@ -720,10 +739,33 @@ export interface TopologyResult {
     readonly boundingBox: BoundingBox;
     /** True if the shape is geometrically and topologically valid. */
     readonly isValid: boolean;
+    readonly solids?: readonly TopologySolid[];
+    readonly shells?: readonly TopologyShell[];
+    readonly wires?: readonly TopologyWire[];
     readonly faces?: readonly TopologyFace[];
     readonly edges?: readonly TopologyEdge[];
     readonly vertices?: readonly TopologyVertex[];
     readonly deletedEntities?: readonly TopologyDeletedEntity[];
+}
+
+export interface TopologySolid {
+    readonly id: number;
+    readonly shellIds?: readonly number[];
+    readonly status?: TopologyEntityStatus;
+}
+
+export interface TopologyShell {
+    readonly id: number;
+    readonly solidIds?: readonly number[];
+    readonly faceIds?: readonly number[];
+    readonly status?: TopologyEntityStatus;
+}
+
+export interface TopologyWire {
+    readonly id: number;
+    readonly edgeIds?: readonly number[];
+    readonly topoFaceIds?: readonly number[];
+    readonly status?: TopologyEntityStatus;
 }
 
 export type TopologyEntityStatus = 'generated' | 'modified' | 'retained' | 'deleted' | 'unresolved';
@@ -857,6 +899,7 @@ export interface KernelCapabilities {
     readonly triangleNormalsV1: boolean;
     readonly triangleFaceMappingV1: boolean;
     readonly topologySubshapesV1: boolean;
+    readonly topologyHierarchyV1?: boolean;
     readonly geometricStableHashesV1: boolean;
     readonly revisionInfoV1: boolean;
     readonly entityResolutionV1: boolean;
@@ -865,6 +908,9 @@ export interface KernelCapabilities {
     readonly historyV1: boolean;
     readonly stableNamingV1: boolean;
     readonly checkpointV1: boolean;
+    readonly versionInfoV1?: boolean;
+    readonly analysisV1?: boolean;
+    readonly sessionHandlesV1?: boolean;
     readonly operations?: {
         readonly structuredSpecsV1?: boolean;
         readonly operationSchemaV1?: boolean;
@@ -982,6 +1028,113 @@ export interface KernelCapabilities {
         readonly evaluateFace: boolean;
         readonly parameterModes: readonly string[];
     };
+    readonly analysis?: {
+        readonly volume: boolean;
+        readonly surfaceArea: boolean;
+        readonly linearLength: boolean;
+        readonly boundingBox: boolean;
+        readonly centerOfMass: boolean;
+        readonly shapeValidity: boolean;
+        readonly pointContainment: boolean;
+        readonly shapeIntersection?: boolean;
+        readonly closestPoint?: boolean;
+        readonly shapeDistance?: boolean;
+    };
+    readonly runtime?: {
+        readonly browser: boolean;
+        readonly worker: boolean;
+        readonly node: boolean;
+    };
+}
+
+export interface ShapeAnalysisParams {
+    readonly shape: ShapeHandle;
+}
+
+export interface ShapeAnalysisResult {
+    readonly shapeType: string;
+    readonly solidCount: number;
+    readonly shellCount: number;
+    readonly wireCount: number;
+    readonly faceCount: number;
+    readonly edgeCount: number;
+    readonly vertexCount: number;
+    readonly boundingBox: BoundingBox;
+    readonly isValid: boolean;
+    readonly volume: number;
+    readonly surfaceArea: number;
+    readonly linearLength: number;
+    readonly centerOfMass: Point3 | null;
+    readonly centerOfMassBasis: 'volume' | 'surface' | 'linear' | 'none';
+}
+
+export interface PointContainmentParams {
+    readonly shape: ShapeHandle;
+    readonly point: Point3;
+    readonly tolerance?: number;
+}
+
+export interface PointContainmentResult {
+    readonly point: Point3;
+    readonly tolerance: number;
+    readonly state: 'in' | 'out' | 'on' | 'unknown';
+    readonly isInside: boolean;
+}
+
+export interface ShapeIntersectionParams {
+    readonly shapeA: ShapeHandle;
+    readonly shapeB: ShapeHandle;
+}
+
+export interface ShapeIntersectionResult {
+    readonly hasIntersection: boolean;
+    readonly edgeCount: number;
+    readonly vertexCount: number;
+    readonly sectionShape?: ShapeHandle;
+}
+
+export interface ShapeSupportRef {
+    readonly kind: 'vertex' | 'edge' | 'face';
+    readonly topoId?: number;
+    readonly stableHash?: string;
+    readonly parameter?: number;
+    readonly uv?: Point2;
+}
+
+export interface ClosestPointOnShapeParams {
+    readonly shape: ShapeHandle;
+    readonly point: Point3;
+    readonly tolerance?: number;
+}
+
+export interface ClosestPointOnShapeResult {
+    readonly queryPoint: Point3;
+    readonly closestPoint: Point3;
+    readonly distance: number;
+    readonly solutionCount: number;
+    readonly support: ShapeSupportRef;
+}
+
+export interface ShapeDistanceParams {
+    readonly shapeA: ShapeHandle;
+    readonly shapeB: ShapeHandle;
+    readonly tolerance?: number;
+}
+
+export interface ShapeDistanceSolution {
+    readonly pointOnA: Point3;
+    readonly pointOnB: Point3;
+    readonly supportOnA: ShapeSupportRef;
+    readonly supportOnB: ShapeSupportRef;
+}
+
+export interface ShapeDistanceResult {
+    readonly distance: number;
+    readonly clearance: number;
+    readonly innerSolution: boolean;
+    readonly isInContact: boolean;
+    readonly solutionCount: number;
+    readonly solutions: readonly ShapeDistanceSolution[];
 }
 
 // ---------------------------------------------------------------------------

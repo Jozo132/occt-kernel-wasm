@@ -11,12 +11,16 @@
 // OCCT foundation
 #include <Standard_Version.hxx>
 #include <Standard_ErrorHandler.hxx>
+#include <Precision.hxx>
 
 // Topology
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <TopoDS.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepLib.hxx>
@@ -24,9 +28,12 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepGProp.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <GProp_GProps.hxx>
 
 // Primitives
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -56,6 +63,9 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepExtrema_SupportType.hxx>
 
 // Fillets / chamfers
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -100,6 +110,7 @@
 #include <NCollection_List.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopExp.hxx>
+#include <TopAbs_State.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 
 // String / stream helpers
@@ -155,6 +166,13 @@ static std::string makeErrorJson(const std::string& code, const std::string& det
 
 static void throwKernelError(const std::string& code, const std::string& detail) {
     throw std::runtime_error(makeErrorJson(code, detail));
+}
+
+static bool looksLikeKernelErrorJson(const std::string& text) {
+    return !text.empty()
+        && text.front() == '{'
+        && text.find("\"code\"") != std::string::npos
+        && text.find("\"detail\"") != std::string::npos;
 }
 
 namespace {
@@ -686,6 +704,65 @@ std::string surfaceTypeName(GeomAbs_SurfaceType type) {
     case GeomAbs_OtherSurface: return "otherSurface";
     }
     return "unknownSurface";
+}
+
+const char* shapeTypeName(TopAbs_ShapeEnum type) {
+    switch (type) {
+    case TopAbs_COMPOUND: return "compound";
+    case TopAbs_COMPSOLID: return "compSolid";
+    case TopAbs_SOLID: return "solid";
+    case TopAbs_SHELL: return "shell";
+    case TopAbs_FACE: return "face";
+    case TopAbs_WIRE: return "wire";
+    case TopAbs_EDGE: return "edge";
+    case TopAbs_VERTEX: return "vertex";
+    case TopAbs_SHAPE: return "shape";
+    }
+    return "unknown";
+}
+
+const char* containmentStateName(TopAbs_State state) {
+    switch (state) {
+    case TopAbs_IN: return "in";
+    case TopAbs_OUT: return "out";
+    case TopAbs_ON: return "on";
+    case TopAbs_UNKNOWN: return "unknown";
+    }
+    return "unknown";
+}
+
+std::vector<int> childIdsForShape(const TopoDS_Shape& parent,
+                                  const ShapeMap& childMap,
+                                  TopAbs_ShapeEnum childType) {
+    ShapeMap local;
+    TopExp::MapShapes(parent, childType, local);
+    std::vector<int> ids;
+    ids.reserve(static_cast<std::size_t>(local.Extent()));
+    for (int index = 1; index <= local.Extent(); ++index) {
+        const int mappedId = childMap.FindIndex(local(index));
+        if (mappedId > 0) {
+            ids.push_back(mappedId);
+        }
+    }
+    return ids;
+}
+
+std::vector<int> ancestorIdsForShape(const TopoDS_Shape& child,
+                                     const ShapeMap& ancestorMap,
+                                     const ShapeToShapeListMap& childToAncestors) {
+    std::vector<int> ids;
+    if (!childToAncestors.Contains(child)) {
+        return ids;
+    }
+
+    const ShapeList& ancestors = childToAncestors.FindFromKey(child);
+    for (ShapeList::Iterator it(ancestors); it.More(); it.Next()) {
+        const int mappedId = ancestorMap.FindIndex(it.Value());
+        if (mappedId > 0 && std::find(ids.begin(), ids.end(), mappedId) == ids.end()) {
+            ids.push_back(mappedId);
+        }
+    }
+    return ids;
 }
 
 std::string curveTypeName(GeomAbs_CurveType type) {
@@ -1781,6 +1858,19 @@ std::vector<std::string> edgeStableHashesForShape(const TopoDS_Shape& shape, con
     return edgeHashes;
 }
 
+std::vector<std::string> vertexStableHashesForShape(const TopoDS_Shape& shape, const RevisionMetadata* revision) {
+    ShapeMap vertices;
+    TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+
+    std::vector<std::string> vertexHashes(static_cast<std::size_t>(vertices.Extent()) + 1);
+    for (int i = 1; i <= vertices.Extent(); ++i) {
+        vertexHashes[static_cast<std::size_t>(i)] = revision != nullptr && revision->vertexStableHashes.size() == static_cast<std::size_t>(vertices.Extent())
+            ? revision->vertexStableHashes[static_cast<std::size_t>(i - 1)]
+            : makeVertexStableHash(TopoDS::Vertex(vertices(i)));
+    }
+    return vertexHashes;
+}
+
 ResolvedEdgeRef resolveEdgeRef(const TopoDS_Shape& shape,
                                const RevisionMetadata* revision,
                                const mini_json::Value& refValue,
@@ -1864,6 +1954,65 @@ void appendEntityRefJson(std::ostringstream& out, const ResolvedFaceRef& face) {
     out << "{";
     out << "\"topoId\":" << face.topoId << ",";
     out << "\"stableHash\":"; appendJsonString(out, face.stableHash);
+    out << "}";
+}
+
+void appendSupportRefJson(std::ostringstream& out,
+                          const ShapeRecord& record,
+                          const TopoDS_Shape& support,
+                          BRepExtrema_SupportType supportType,
+                          bool hasEdgeParameter = false,
+                          double edgeParameter = 0.0,
+                          bool hasFaceUv = false,
+                          double faceU = 0.0,
+                          double faceV = 0.0) {
+    out << "{";
+
+    switch (supportType) {
+    case BRepExtrema_IsVertex: {
+        out << "\"kind\":\"vertex\"";
+        ShapeMap vertices;
+        TopExp::MapShapes(record.shape, TopAbs_VERTEX, vertices);
+        const int topoId = vertices.FindIndex(support);
+        if (topoId > 0) {
+            const std::vector<std::string> hashes = vertexStableHashesForShape(record.shape, &record.revision);
+            out << ",\"topoId\":" << topoId;
+            out << ",\"stableHash\":"; appendJsonString(out, hashes[static_cast<std::size_t>(topoId)]);
+        }
+        break;
+    }
+    case BRepExtrema_IsOnEdge: {
+        out << "\"kind\":\"edge\"";
+        ShapeMap edges;
+        TopExp::MapShapes(record.shape, TopAbs_EDGE, edges);
+        const int topoId = edges.FindIndex(support);
+        if (topoId > 0) {
+            const std::vector<std::string> hashes = edgeStableHashesForShape(record.shape, &record.revision);
+            out << ",\"topoId\":" << topoId;
+            out << ",\"stableHash\":"; appendJsonString(out, hashes[static_cast<std::size_t>(topoId)]);
+        }
+        if (hasEdgeParameter) {
+            out << ",\"parameter\":" << edgeParameter;
+        }
+        break;
+    }
+    case BRepExtrema_IsInFace: {
+        out << "\"kind\":\"face\"";
+        ShapeMap faces;
+        TopExp::MapShapes(record.shape, TopAbs_FACE, faces);
+        const int topoId = faces.FindIndex(support);
+        if (topoId > 0) {
+            const std::vector<std::string> hashes = faceStableHashesForShape(record.shape, &record.revision);
+            out << ",\"topoId\":" << topoId;
+            out << ",\"stableHash\":"; appendJsonString(out, hashes[static_cast<std::size_t>(topoId)]);
+        }
+        if (hasFaceUv) {
+            out << ",\"uv\":[" << faceU << "," << faceV << "]";
+        }
+        break;
+    }
+    }
+
     out << "}";
 }
 
@@ -2210,6 +2359,37 @@ std::string computeTopologyHash(const TopoDS_Shape& shape) {
     return "T:" + fnv1a64(signature.str());
 }
 
+std::string freshStableHash(const std::string& revisionId,
+                            const char* kind,
+                            const char* prefix,
+                            int index) {
+    return std::string(prefix) + fnv1a64("stable|" + revisionId + "|" + kind + "|" + std::to_string(index));
+}
+
+void assignFreshStableHashes(RevisionMetadata& revision, const TopoDS_Shape& shape) {
+    ShapeMap faces, edges, vertices;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+
+    revision.faceStableHashes.clear();
+    revision.edgeStableHashes.clear();
+    revision.vertexStableHashes.clear();
+    revision.faceStableHashes.reserve(static_cast<std::size_t>(faces.Extent()));
+    revision.edgeStableHashes.reserve(static_cast<std::size_t>(edges.Extent()));
+    revision.vertexStableHashes.reserve(static_cast<std::size_t>(vertices.Extent()));
+
+    for (int index = 1; index <= faces.Extent(); ++index) {
+        revision.faceStableHashes.push_back(freshStableHash(revision.revisionId, "face", "F:", index));
+    }
+    for (int index = 1; index <= edges.Extent(); ++index) {
+        revision.edgeStableHashes.push_back(freshStableHash(revision.revisionId, "edge", "E:", index));
+    }
+    for (int index = 1; index <= vertices.Extent(); ++index) {
+        revision.vertexStableHashes.push_back(freshStableHash(revision.revisionId, "vertex", "V:", index));
+    }
+}
+
 RevisionMetadata makeRevisionMetadata(const TopoDS_Shape& shape,
                                       const std::string& operationType,
                                       const std::string& parameterSignature,
@@ -2234,6 +2414,7 @@ RevisionMetadata makeRevisionMetadata(const TopoDS_Shape& shape,
     revision.entityStatus = entityStatus;
     revision.identityStatus = identityStatus;
     revision.historyWarnings = warnings;
+    assignFreshStableHashes(revision, shape);
     return revision;
 }
 
@@ -2242,6 +2423,224 @@ struct StableEntityRecord {
     int id = 0;
     std::string stableHash;
 };
+
+struct StableSourceSubshape {
+    TopoDS_Shape shape;
+    std::string stableHash;
+};
+
+std::string derivedStableHash(const RevisionMetadata& revision,
+                              const char* kind,
+                              const char* prefix,
+                              const char* relation,
+                              int index,
+                              const std::vector<std::string>& sourceHashes) {
+    std::ostringstream signature;
+    signature << "derived|" << revision.revisionId << '|'
+              << revision.operationId << '|'
+              << kind << '|'
+              << relation << '|'
+              << index << '|';
+    for (const std::string& hash : sourceHashes) {
+        signature << hash << '|';
+    }
+    return std::string(prefix) + fnv1a64(signature.str());
+}
+
+std::vector<StableSourceSubshape> collectSourceSubshapes(const ShapeRecord& record,
+                                                         TopAbs_ShapeEnum kind) {
+    std::vector<StableSourceSubshape> result;
+    ShapeMap map;
+    TopExp::MapShapes(record.shape, kind, map);
+    result.reserve(static_cast<std::size_t>(map.Extent()));
+
+    const std::vector<std::string>* hashes = nullptr;
+    const char* fallbackPrefix = "";
+    const char* fallbackKind = "";
+    switch (kind) {
+    case TopAbs_FACE:
+        hashes = &record.revision.faceStableHashes;
+        fallbackPrefix = "F:";
+        fallbackKind = "face";
+        break;
+    case TopAbs_EDGE:
+        hashes = &record.revision.edgeStableHashes;
+        fallbackPrefix = "E:";
+        fallbackKind = "edge";
+        break;
+    case TopAbs_VERTEX:
+        hashes = &record.revision.vertexStableHashes;
+        fallbackPrefix = "V:";
+        fallbackKind = "vertex";
+        break;
+    default:
+        return result;
+    }
+
+    for (int index = 1; index <= map.Extent(); ++index) {
+        const std::string stableHash = hashes != nullptr && hashes->size() == static_cast<std::size_t>(map.Extent())
+            ? (*hashes)[static_cast<std::size_t>(index - 1)]
+            : freshStableHash(record.revision.revisionId, fallbackKind, fallbackPrefix, index);
+        result.push_back({ map(index), stableHash });
+    }
+
+    return result;
+}
+
+template <typename ShapeListT>
+void appendHistoryResultIndices(const ShapeListT& list,
+                                const ShapeMap& resultMap,
+                                TopAbs_ShapeEnum kind,
+                                std::vector<int>& indices) {
+    for (typename ShapeListT::Iterator it(list); it.More(); it.Next()) {
+        const TopoDS_Shape& candidate = it.Value();
+        if (candidate.ShapeType() != kind) {
+            continue;
+        }
+        const int mapped = resultMap.FindIndex(candidate);
+        if (mapped > 0 && std::find(indices.begin(), indices.end(), mapped) == indices.end()) {
+            indices.push_back(mapped);
+        }
+    }
+}
+
+template <typename Builder>
+std::vector<int> historyResultIndices(Builder& builder,
+                                      const TopoDS_Shape& sourceShape,
+                                      const ShapeMap& resultMap,
+                                      TopAbs_ShapeEnum kind) {
+    std::vector<int> indices;
+    appendHistoryResultIndices(builder.Modified(sourceShape), resultMap, kind, indices);
+    appendHistoryResultIndices(builder.Generated(sourceShape), resultMap, kind, indices);
+    const int retained = resultMap.FindIndex(sourceShape);
+    if (retained > 0 && std::find(indices.begin(), indices.end(), retained) == indices.end()) {
+        indices.push_back(retained);
+    }
+    std::sort(indices.begin(), indices.end());
+    return indices;
+}
+
+template <typename Builder>
+std::vector<std::string> assignHistoryStableHashesForKind(const TopoDS_Shape& resultShape,
+                                                          const RevisionMetadata& revision,
+                                                          const std::vector<const ShapeRecord*>& sourceRecords,
+                                                          Builder& builder,
+                                                          TopAbs_ShapeEnum kind,
+                                                          const char* kindLabel,
+                                                          const char* prefix,
+                                                          std::vector<DeletedEntityRecord>& deletedEntities) {
+    ShapeMap resultMap;
+    TopExp::MapShapes(resultShape, kind, resultMap);
+    std::vector<std::string> assignments(static_cast<std::size_t>(resultMap.Extent()) + 1);
+    if (resultMap.Extent() == 0) {
+        return assignments;
+    }
+
+    std::vector<std::vector<std::string>> sourceHashesByResult(static_cast<std::size_t>(resultMap.Extent()) + 1);
+
+    for (const ShapeRecord* sourceRecord : sourceRecords) {
+        for (const StableSourceSubshape& source : collectSourceSubshapes(*sourceRecord, kind)) {
+            const std::vector<int> descendants = historyResultIndices(builder, source.shape, resultMap, kind);
+            if (descendants.empty()) {
+                deletedEntities.push_back({ kindLabel, source.stableHash, revision.operationId, "deleted" });
+                continue;
+            }
+            for (int descendant : descendants) {
+                std::vector<std::string>& sourceHashes = sourceHashesByResult[static_cast<std::size_t>(descendant)];
+                if (std::find(sourceHashes.begin(), sourceHashes.end(), source.stableHash) == sourceHashes.end()) {
+                    sourceHashes.push_back(source.stableHash);
+                }
+            }
+        }
+    }
+
+    std::unordered_map<std::string, std::vector<int>> sourceToResults;
+    for (int index = 1; index <= resultMap.Extent(); ++index) {
+        std::vector<std::string>& sourceHashes = sourceHashesByResult[static_cast<std::size_t>(index)];
+        std::sort(sourceHashes.begin(), sourceHashes.end());
+        for (const std::string& stableHash : sourceHashes) {
+            sourceToResults[stableHash].push_back(index);
+        }
+    }
+
+    std::unordered_map<std::string, int> primaryResultBySource;
+    for (const auto& entry : sourceToResults) {
+        const std::vector<int>& candidates = entry.second;
+        const auto singleSourceIt = std::find_if(candidates.begin(), candidates.end(), [&](int candidate) {
+            return sourceHashesByResult[static_cast<std::size_t>(candidate)].size() == 1;
+        });
+        primaryResultBySource[entry.first] = singleSourceIt != candidates.end() ? *singleSourceIt : candidates.front();
+    }
+
+    std::set<std::string> usedHashes;
+    for (int index = 1; index <= resultMap.Extent(); ++index) {
+        const std::vector<std::string>& sourceHashes = sourceHashesByResult[static_cast<std::size_t>(index)];
+        if (sourceHashes.empty()) {
+            assignments[static_cast<std::size_t>(index)] = freshStableHash(revision.revisionId, kindLabel, prefix, index);
+            continue;
+        }
+
+        if (sourceHashes.size() == 1) {
+            const std::string& inherited = sourceHashes.front();
+            auto primaryIt = primaryResultBySource.find(inherited);
+            const bool canReuse = primaryIt != primaryResultBySource.end()
+                && primaryIt->second == index
+                && usedHashes.insert(inherited).second;
+            assignments[static_cast<std::size_t>(index)] = canReuse
+                ? inherited
+                : derivedStableHash(revision, kindLabel, prefix, "split", index, sourceHashes);
+            continue;
+        }
+
+        assignments[static_cast<std::size_t>(index)] = derivedStableHash(revision, kindLabel, prefix, "merge", index, sourceHashes);
+    }
+
+    return assignments;
+}
+
+template <typename Builder>
+void applyHistoryStableHashes(const TopoDS_Shape& resultShape,
+                              RevisionMetadata& revision,
+                              const std::vector<const ShapeRecord*>& sourceRecords,
+                              Builder& builder) {
+    revision.faceStableHashes = assignHistoryStableHashesForKind(resultShape,
+                                                                 revision,
+                                                                 sourceRecords,
+                                                                 builder,
+                                                                 TopAbs_FACE,
+                                                                 "face",
+                                                                 "F:",
+                                                                 revision.deletedEntities);
+    if (!revision.faceStableHashes.empty()) {
+        revision.faceStableHashes.erase(revision.faceStableHashes.begin());
+    }
+
+    revision.edgeStableHashes = assignHistoryStableHashesForKind(resultShape,
+                                                                 revision,
+                                                                 sourceRecords,
+                                                                 builder,
+                                                                 TopAbs_EDGE,
+                                                                 "edge",
+                                                                 "E:",
+                                                                 revision.deletedEntities);
+    if (!revision.edgeStableHashes.empty()) {
+        revision.edgeStableHashes.erase(revision.edgeStableHashes.begin());
+    }
+
+    revision.vertexStableHashes = assignHistoryStableHashesForKind(resultShape,
+                                                                   revision,
+                                                                   sourceRecords,
+                                                                   builder,
+                                                                   TopAbs_VERTEX,
+                                                                   "vertex",
+                                                                   "V:",
+                                                                   revision.deletedEntities);
+    if (!revision.vertexStableHashes.empty()) {
+        revision.vertexStableHashes.erase(revision.vertexStableHashes.begin());
+    }
+
+    revision.identityStatus = "resolved";
+}
 
 std::vector<StableEntityRecord> collectStableEntities(const TopoDS_Shape& shape, const RevisionMetadata* revision = nullptr) {
     std::vector<StableEntityRecord> records;
@@ -3186,17 +3585,27 @@ static uint32_t runBoolean(
 
 uint32_t OcctKernel::booleanUnion(uint32_t id1, uint32_t id2) {
     try {
+        auto sourceIt1 = _impl->records.find(id1);
+        auto sourceIt2 = _impl->records.find(id2);
+        if (sourceIt1 == _impl->records.end() || sourceIt2 == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "BooleanUnion requires valid resident handles");
+        }
         const TopoDS_Shape& s1 = requireShape(id1);
         const TopoDS_Shape& s2 = requireShape(id2);
         BRepAlgoAPI_Fuse op(s1, s2);
         runBoolean(this, id1, id2, "BooleanUnion", op);
-        return storeShapeWithMetadata(op.Shape(),
-                          "booleanUnion",
-                          "base=" + requireRevisionId(id1) + ";tool=" + requireRevisionId(id2),
-                          { requireRevisionId(id1), requireRevisionId(id2) },
-                          "unresolved",
-                          "unresolved",
-                          { "Boolean subshape lineage is not yet proven; generated/modified/deleted identity is reported as unresolved" });
+        const uint32_t resultId = storeShapeWithMetadata(op.Shape(),
+                                                         "booleanUnion",
+                                                         "base=" + requireRevisionId(id1) + ";tool=" + requireRevisionId(id2),
+                                                         { requireRevisionId(id1), requireRevisionId(id2) },
+                                                         "unresolved",
+                                                         "resolved",
+                                                         { "Stable semantic subshape ids are propagated through exact OCCT boolean history; split and merged descendants receive derived ids." });
+        applyHistoryStableHashes(_impl->records[resultId].shape,
+                                 _impl->records[resultId].revision,
+                                 { &sourceIt1->second, &sourceIt2->second },
+                                 op);
+        return resultId;
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
@@ -3207,17 +3616,27 @@ uint32_t OcctKernel::booleanUnion(uint32_t id1, uint32_t id2) {
 
 uint32_t OcctKernel::booleanSubtract(uint32_t id1, uint32_t id2) {
     try {
+        auto sourceIt1 = _impl->records.find(id1);
+        auto sourceIt2 = _impl->records.find(id2);
+        if (sourceIt1 == _impl->records.end() || sourceIt2 == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "BooleanSubtract requires valid resident handles");
+        }
         const TopoDS_Shape& s1 = requireShape(id1);
         const TopoDS_Shape& s2 = requireShape(id2);
         BRepAlgoAPI_Cut op(s1, s2);
         runBoolean(this, id1, id2, "BooleanSubtract", op);
-        return storeShapeWithMetadata(op.Shape(),
-                          "booleanSubtract",
-                          "base=" + requireRevisionId(id1) + ";tool=" + requireRevisionId(id2),
-                          { requireRevisionId(id1), requireRevisionId(id2) },
-                          "unresolved",
-                          "unresolved",
-                          { "Boolean subshape lineage is not yet proven; generated/modified/deleted identity is reported as unresolved" });
+        const uint32_t resultId = storeShapeWithMetadata(op.Shape(),
+                                                         "booleanSubtract",
+                                                         "base=" + requireRevisionId(id1) + ";tool=" + requireRevisionId(id2),
+                                                         { requireRevisionId(id1), requireRevisionId(id2) },
+                                                         "unresolved",
+                                                         "resolved",
+                                                         { "Stable semantic subshape ids are propagated through exact OCCT boolean history; split and merged descendants receive derived ids." });
+        applyHistoryStableHashes(_impl->records[resultId].shape,
+                                 _impl->records[resultId].revision,
+                                 { &sourceIt1->second, &sourceIt2->second },
+                                 op);
+        return resultId;
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
@@ -3228,17 +3647,27 @@ uint32_t OcctKernel::booleanSubtract(uint32_t id1, uint32_t id2) {
 
 uint32_t OcctKernel::booleanIntersect(uint32_t id1, uint32_t id2) {
     try {
+        auto sourceIt1 = _impl->records.find(id1);
+        auto sourceIt2 = _impl->records.find(id2);
+        if (sourceIt1 == _impl->records.end() || sourceIt2 == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "BooleanIntersect requires valid resident handles");
+        }
         const TopoDS_Shape& s1 = requireShape(id1);
         const TopoDS_Shape& s2 = requireShape(id2);
         BRepAlgoAPI_Common op(s1, s2);
         runBoolean(this, id1, id2, "BooleanIntersect", op);
-        return storeShapeWithMetadata(op.Shape(),
-                          "booleanIntersect",
-                          "base=" + requireRevisionId(id1) + ";tool=" + requireRevisionId(id2),
-                          { requireRevisionId(id1), requireRevisionId(id2) },
-                          "unresolved",
-                          "unresolved",
-                          { "Boolean subshape lineage is not yet proven; generated/modified/deleted identity is reported as unresolved" });
+        const uint32_t resultId = storeShapeWithMetadata(op.Shape(),
+                                                         "booleanIntersect",
+                                                         "base=" + requireRevisionId(id1) + ";tool=" + requireRevisionId(id2),
+                                                         { requireRevisionId(id1), requireRevisionId(id2) },
+                                                         "unresolved",
+                                                         "resolved",
+                                                         { "Stable semantic subshape ids are propagated through exact OCCT boolean history; split and merged descendants receive derived ids." });
+        applyHistoryStableHashes(_impl->records[resultId].shape,
+                                 _impl->records[resultId].revision,
+                                 { &sourceIt1->second, &sourceIt2->second },
+                                 op);
+        return resultId;
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
@@ -3256,6 +3685,10 @@ uint32_t OcctKernel::filletEdges(uint32_t id, double radius) {
         throwKernelError("INVALID_PARAMS", "Fillet radius must be > 0");
     }
     try {
+        auto sourceIt = _impl->records.find(id);
+        if (sourceIt == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
         const TopoDS_Shape& shape = requireShape(id);
         BRepFilletAPI_MakeFillet mkFillet(shape);
         for (TopExp_Explorer ex(shape, TopAbs_EDGE); ex.More(); ex.Next()) {
@@ -3265,13 +3698,18 @@ uint32_t OcctKernel::filletEdges(uint32_t id, double radius) {
         if (!mkFillet.IsDone()) {
             throwKernelError("OPERATION_FAILED", "BRepFilletAPI_MakeFillet failed");
         }
-        return storeShapeWithMetadata(mkFillet.Shape(),
-                                      "filletEdges",
-                                      "source=" + requireRevisionId(id) + ";radius=" + std::to_string(radius),
-                                      { requireRevisionId(id) },
-                                      "unresolved",
-                                      "unresolved",
-                                      { "Fillet subshape lineage is not yet proven; generated/modified/deleted identity is reported as unresolved" });
+        const uint32_t resultId = storeShapeWithMetadata(mkFillet.Shape(),
+                                                         "filletEdges",
+                                                         "source=" + requireRevisionId(id) + ";radius=" + std::to_string(radius),
+                                                         { requireRevisionId(id) },
+                                                         "unresolved",
+                                                         "resolved",
+                                                         { "Stable semantic subshape ids are propagated through exact OCCT fillet history; split descendants receive derived ids." });
+        applyHistoryStableHashes(_impl->records[resultId].shape,
+                                 _impl->records[resultId].revision,
+                                 { &sourceIt->second },
+                                 mkFillet);
+        return resultId;
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
@@ -3285,6 +3723,10 @@ uint32_t OcctKernel::chamferEdges(uint32_t id, double distance) {
         throwKernelError("INVALID_PARAMS", "Chamfer distance must be > 0");
     }
     try {
+        auto sourceIt = _impl->records.find(id);
+        if (sourceIt == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
         const TopoDS_Shape& shape = requireShape(id);
         BRepFilletAPI_MakeChamfer mkChamfer(shape);
         ShapeMap edgeMap, faceMap;
@@ -3310,13 +3752,18 @@ uint32_t OcctKernel::chamferEdges(uint32_t id, double distance) {
         if (!mkChamfer.IsDone()) {
             throwKernelError("OPERATION_FAILED", "BRepFilletAPI_MakeChamfer failed");
         }
-        return storeShapeWithMetadata(mkChamfer.Shape(),
-                                      "chamferEdges",
-                                      "source=" + requireRevisionId(id) + ";distance=" + std::to_string(distance),
-                                      { requireRevisionId(id) },
-                                      "unresolved",
-                                      "unresolved",
-                                      { "Chamfer subshape lineage is not yet proven; generated/modified/deleted identity is reported as unresolved" });
+        const uint32_t resultId = storeShapeWithMetadata(mkChamfer.Shape(),
+                                                         "chamferEdges",
+                                                         "source=" + requireRevisionId(id) + ";distance=" + std::to_string(distance),
+                                                         { requireRevisionId(id) },
+                                                         "unresolved",
+                                                         "resolved",
+                                                         { "Stable semantic subshape ids are propagated through exact OCCT chamfer history; split descendants receive derived ids." });
+        applyHistoryStableHashes(_impl->records[resultId].shape,
+                                 _impl->records[resultId].revision,
+                                 { &sourceIt->second },
+                                 mkChamfer);
+        return resultId;
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
@@ -3507,12 +3954,23 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                                                          "source=" + sourceRevision->revisionId + ";spec=" + fnv1a64(objectToStableSignature(root)),
                                                          { sourceRevision->revisionId },
                                                          "unresolved",
-                                                         "unresolved",
-                                                         { "Fillet generated/modified/deleted lineage is reported from OCCT history when available; unresolved entries are explicit in the result payload" });
+                                                         "resolved",
+                                                         { "Stable semantic subshape ids are propagated through exact OCCT fillet history; explicit blend lineage remains available in the result payload." });
         auto resultIt = _impl->records.find(resultId);
         if (resultIt != _impl->records.end()) {
+            applyHistoryStableHashes(resultIt->second.shape,
+                                     resultIt->second.revision,
+                                     { &sourceIt->second },
+                                     mkFillet);
             for (const ResolvedEdgeRef& edge : appliedEdges) {
-                resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "unresolved" });
+                const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
+                                                    resultIt->second.revision.deletedEntities.end(),
+                                                    [&](const DeletedEntityRecord& record) {
+                                                        return record.kind == "edge" && record.stableHash == edge.stableHash;
+                                                    });
+                if (duplicate == resultIt->second.revision.deletedEntities.end()) {
+                    resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
+                }
             }
         }
         return makeBlendResultJson(this, resultId, mkFillet, shape, appliedEdges, normalizedParameters, "filletFace");
@@ -3669,12 +4127,23 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                                                          "source=" + sourceRevision->revisionId + ";spec=" + fnv1a64(objectToStableSignature(root)),
                                                          { sourceRevision->revisionId },
                                                          "unresolved",
-                                                         "unresolved",
-                                                         { "Chamfer generated/modified/deleted lineage is reported from OCCT history when available; unresolved entries are explicit in the result payload" });
+                                                         "resolved",
+                                                         { "Stable semantic subshape ids are propagated through exact OCCT chamfer history; explicit blend lineage remains available in the result payload." });
         auto resultIt = _impl->records.find(resultId);
         if (resultIt != _impl->records.end()) {
+            applyHistoryStableHashes(resultIt->second.shape,
+                                     resultIt->second.revision,
+                                     { &sourceIt->second },
+                                     mkChamfer);
             for (const ResolvedEdgeRef& edge : appliedEdges) {
-                resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "unresolved" });
+                const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
+                                                    resultIt->second.revision.deletedEntities.end(),
+                                                    [&](const DeletedEntityRecord& record) {
+                                                        return record.kind == "edge" && record.stableHash == edge.stableHash;
+                                                    });
+                if (duplicate == resultIt->second.revision.deletedEntities.end()) {
+                    resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
+                }
             }
         }
         return makeBlendResultJson(this, resultId, mkChamfer, shape, appliedEdges, normalizedParameters, "chamferFace");
@@ -3719,6 +4188,9 @@ uint32_t OcctKernel::transformShape(uint32_t id, const std::string& transformJso
                                                         "retained",
                                                         {});
         RevisionMetadata& revision = _impl->records[resultId].revision;
+        revision.faceStableHashes.clear();
+        revision.edgeStableHashes.clear();
+        revision.vertexStableHashes.clear();
         for (const StableEntityRecord& entity : sourceEntities) {
             if (entity.kind == "face") {
                 revision.faceStableHashes.push_back(entity.stableHash);
@@ -3751,13 +4223,20 @@ std::string OcctKernel::getTopology(uint32_t id) {
         const TopoDS_Shape& shape = record.shape;
         const RevisionMetadata& revision = record.revision;
 
-        ShapeMap faces, edges, vertices;
+        ShapeMap solids, shells, wires, faces, edges, vertices;
+        TopExp::MapShapes(shape, TopAbs_SOLID,  solids);
+        TopExp::MapShapes(shape, TopAbs_SHELL,  shells);
+        TopExp::MapShapes(shape, TopAbs_WIRE,   wires);
         TopExp::MapShapes(shape, TopAbs_FACE,   faces);
         TopExp::MapShapes(shape, TopAbs_EDGE,   edges);
         TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
 
         ShapeToShapeListMap edgeToFaces;
         TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
+        ShapeToShapeListMap shellToSolids;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_SHELL, TopAbs_SOLID, shellToSolids);
+        ShapeToShapeListMap wireToFaces;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_WIRE, TopAbs_FACE, wireToFaces);
 
         std::vector<std::string> faceHashes(static_cast<std::size_t>(faces.Extent()) + 1);
         for (int i = 1; i <= faces.Extent(); ++i) {
@@ -3790,10 +4269,7 @@ std::string OcctKernel::getTopology(uint32_t id) {
                 : makeVertexStableHash(TopoDS::Vertex(vertices(i)));
         }
 
-        Bnd_Box bbox;
-        BRepBndLib::AddOptimal(shape, bbox, true, false);
-        double xMin, yMin, zMin, xMax, yMax, zMax;
-        bbox.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+        const auto bounds = boundsOfShape(shape);
 
         BRepCheck_Analyzer analyzer(shape);
         bool isValid = analyzer.IsValid();
@@ -3815,18 +4291,22 @@ std::string OcctKernel::getTopology(uint32_t id) {
         ss << "\"topologyHash\":"; appendJsonString(ss, revision.topologyHash); ss << ",";
         ss << "\"historySchemaVersion\":" << revision.historySchemaVersion << ",";
         ss << "\"createdFromCheckpoint\":" << (revision.createdFromCheckpoint ? "true" : "false") << ",";
+        ss << "\"shapeType\":"; appendJsonString(ss, shapeTypeName(shape.ShapeType())); ss << ",";
         ss << "\"identityStatus\":"; appendJsonString(ss, revision.identityStatus); ss << ",";
         ss << "\"historyWarnings\":"; appendStringArrayJson(ss, revision.historyWarnings); ss << ",";
+        ss << "\"solidCount\":"  << solids.Extent()   << ",";
+        ss << "\"shellCount\":"  << shells.Extent()   << ",";
+        ss << "\"wireCount\":"   << wires.Extent()    << ",";
         ss << "\"faceCount\":"   << faces.Extent()    << ",";
         ss << "\"edgeCount\":"   << edges.Extent()    << ",";
         ss << "\"vertexCount\":" << vertices.Extent() << ",";
         ss << "\"boundingBox\":{";
-        ss << "\"xMin\":"  << xMin << ",";
-        ss << "\"yMin\":"  << yMin << ",";
-        ss << "\"zMin\":"  << zMin << ",";
-        ss << "\"xMax\":"  << xMax << ",";
-        ss << "\"yMax\":"  << yMax << ",";
-        ss << "\"zMax\":"  << zMax;
+        ss << "\"xMin\":"  << bounds[0] << ",";
+        ss << "\"yMin\":"  << bounds[1] << ",";
+        ss << "\"zMin\":"  << bounds[2] << ",";
+        ss << "\"xMax\":"  << bounds[3] << ",";
+        ss << "\"yMax\":"  << bounds[4] << ",";
+        ss << "\"zMax\":"  << bounds[5];
         ss << "},";
         ss << "\"isValid\":" << (isValid ? "true" : "false") << ",";
 
@@ -3837,6 +4317,46 @@ std::string OcctKernel::getTopology(uint32_t id) {
                 ss << "[]";
             }
         };
+
+        ss << "\"solids\":[";
+        for (int i = 1; i <= solids.Extent(); ++i) {
+            if (i > 1) ss << ",";
+            ss << "{";
+            ss << "\"id\":" << i << ",";
+            ss << "\"shellIds\":";
+            appendIntArrayJson(ss, childIdsForShape(solids(i), shells, TopAbs_SHELL));
+            ss << ",\"status\":"; appendJsonString(ss, revision.entityStatus);
+            ss << "}";
+        }
+        ss << "],";
+
+        ss << "\"shells\":[";
+        for (int i = 1; i <= shells.Extent(); ++i) {
+            if (i > 1) ss << ",";
+            ss << "{";
+            ss << "\"id\":" << i << ",";
+            ss << "\"solidIds\":";
+            appendIntArrayJson(ss, ancestorIdsForShape(shells(i), solids, shellToSolids));
+            ss << ",\"faceIds\":";
+            appendIntArrayJson(ss, childIdsForShape(shells(i), faces, TopAbs_FACE));
+            ss << ",\"status\":"; appendJsonString(ss, revision.entityStatus);
+            ss << "}";
+        }
+        ss << "],";
+
+        ss << "\"wires\":[";
+        for (int i = 1; i <= wires.Extent(); ++i) {
+            if (i > 1) ss << ",";
+            ss << "{";
+            ss << "\"id\":" << i << ",";
+            ss << "\"edgeIds\":";
+            appendIntArrayJson(ss, childIdsForShape(wires(i), edges, TopAbs_EDGE));
+            ss << ",\"topoFaceIds\":";
+            appendIntArrayJson(ss, ancestorIdsForShape(wires(i), faces, wireToFaces));
+            ss << ",\"status\":"; appendJsonString(ss, revision.entityStatus);
+            ss << "}";
+        }
+        ss << "],";
 
         ss << "\"faces\":[";
         for (int i = 1; i <= faces.Extent(); ++i) {
@@ -4287,6 +4807,12 @@ std::string OcctKernel::getOperationSchema() const {
         "\"loft\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"cutBoolean\":true,\"sectionKinds\":[\"profile\",\"wire\",\"point\"],\"solid\":true,\"ruled\":true,\"pres3d\":true,\"checkCompatibility\":true,\"smoothing\":true,\"parametrization\":[\"chordLength\",\"centripetal\",\"isoParametric\"],\"continuity\":[\"C0\",\"G1\",\"C1\",\"G2\",\"C2\",\"C3\",\"CN\"],\"criteriumWeight\":true,\"maxDegree\":true,\"mutableInput\":true}},"
         "\"filletEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"constantRadius\":true,\"startEndRadius\":true,\"stationRadii\":true,\"lawRadius\":[\"constant\",\"linear\"],\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"blendShape\":[\"rational\",\"quasiAngular\",\"polynomial\"],\"continuity\":[\"C0\",\"C1\",\"C2\"],\"overflowModes\":[\"fail\"]}},"
         "\"chamferEdges\":{\"schemaVersion\":1,\"nativeExact\":true,\"requiresMeshFallback\":false,\"supports\":{\"symmetric\":true,\"twoDistance\":true,\"distanceAngle\":true,\"referenceFace\":true,\"tangentPropagation\":true,\"partialEdges\":false,\"setbackCorners\":false,\"overflowModes\":[\"fail\"]}},"
+        "\"getVersionInfo\":{\"schemaVersion\":1,\"nativeExact\":true,\"sessionScoped\":true},"
+        "\"analyzeShape\":{\"schemaVersion\":1,\"nativeExact\":true,\"pointContainment\":true},"
+        "\"classifyPointContainment\":{\"schemaVersion\":1,\"nativeExact\":true,\"states\":[\"in\",\"out\",\"on\",\"unknown\"]},"
+        "\"intersectShapes\":{\"schemaVersion\":1,\"nativeExact\":true,\"returnsSectionShape\":true},"
+        "\"findClosestPointOnShape\":{\"schemaVersion\":1,\"nativeExact\":true,\"supportKinds\":[\"vertex\",\"edge\",\"face\"]},"
+        "\"measureShapeDistance\":{\"schemaVersion\":1,\"nativeExact\":true,\"multipleSolutions\":true,\"supportKinds\":[\"vertex\",\"edge\",\"face\"]},"
         "\"evaluateEdge\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
         "\"sampleEdge\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
         "\"getEdgeCurve\":{\"schemaVersion\":1,\"nativeExact\":true},"
@@ -4302,14 +4828,18 @@ std::string OcctKernel::getCapabilities() const {
         "\"triangleNormalsV1\":true,"
         "\"triangleFaceMappingV1\":true,"
         "\"topologySubshapesV1\":true,"
+        "\"topologyHierarchyV1\":true,"
         "\"geometricStableHashesV1\":true,"
         "\"revisionInfoV1\":true,"
         "\"entityResolutionV1\":true,"
         "\"entityRemapV1\":true,"
         "\"revisionRetentionV1\":true,"
         "\"historyV1\":true,"
-        "\"stableNamingV1\":false,"
+        "\"stableNamingV1\":true,"
         "\"checkpointV1\":true,"
+        "\"versionInfoV1\":true,"
+        "\"analysisV1\":true,"
+        "\"sessionHandlesV1\":true,"
         "\"operations\":{"
         "\"structuredSpecsV1\":true,"
         "\"operationSchemaV1\":true,"
@@ -4426,8 +4956,365 @@ std::string OcctKernel::getCapabilities() const {
         "\"getEdgeCurve\":true,"
         "\"evaluateFace\":true,"
         "\"parameterModes\":[\"normalized\",\"native\"]"
+        "},"
+        "\"analysis\":{"
+        "\"volume\":true,"
+        "\"surfaceArea\":true,"
+        "\"linearLength\":true,"
+        "\"boundingBox\":true,"
+        "\"centerOfMass\":true,"
+        "\"shapeValidity\":true,"
+        "\"pointContainment\":true,"
+        "\"shapeIntersection\":true,"
+        "\"closestPoint\":true,"
+        "\"shapeDistance\":true"
+        "},"
+        "\"runtime\":{"
+        "\"browser\":true,"
+        "\"worker\":true,"
+        "\"node\":true"
         "}"
         "}";
+}
+
+std::string OcctKernel::getKernelVersionInfo() const {
+    return "{"
+        "\"kernelVersion\":\"" OCC_VERSION_COMPLETE "\"," 
+        "\"kernelVersionMajor\":" + std::to_string(OCC_VERSION_MAJOR) + ","
+        "\"kernelVersionMinor\":" + std::to_string(OCC_VERSION_MINOR) + ","
+        "\"kernelVersionMaintenance\":" + std::to_string(OCC_VERSION_MAINTENANCE) + ","
+        "\"checkpointSchemaVersion\":1,"
+        "\"operationSchemaVersion\":1"
+        "}";
+}
+
+std::string OcctKernel::analyzeShape(uint32_t id) {
+    try {
+        const TopoDS_Shape& shape = requireShape(id);
+
+        ShapeMap solids, shells, wires, faces, edges, vertices;
+        TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+        TopExp::MapShapes(shape, TopAbs_SHELL, shells);
+        TopExp::MapShapes(shape, TopAbs_WIRE, wires);
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+        TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+
+        GProp_GProps linearProps;
+        GProp_GProps surfaceProps;
+        GProp_GProps volumeProps;
+        BRepGProp::LinearProperties(shape, linearProps, false, false);
+        BRepGProp::SurfaceProperties(shape, surfaceProps, false, false);
+        if (solids.Extent() > 0) {
+            BRepGProp::VolumeProperties(shape, volumeProps, true, false, false);
+        }
+
+        const auto bounds = boundsOfShape(shape);
+        BRepCheck_Analyzer analyzer(shape);
+
+        std::string basis = "none";
+        gp_Pnt center(0.0, 0.0, 0.0);
+        bool hasCenter = false;
+        if (solids.Extent() > 0 && std::abs(volumeProps.Mass()) > Precision::Confusion()) {
+            basis = "volume";
+            center = volumeProps.CentreOfMass();
+            hasCenter = true;
+        } else if (faces.Extent() > 0 && std::abs(surfaceProps.Mass()) > Precision::Confusion()) {
+            basis = "surface";
+            center = surfaceProps.CentreOfMass();
+            hasCenter = true;
+        } else if (edges.Extent() > 0 && std::abs(linearProps.Mass()) > Precision::Confusion()) {
+            basis = "linear";
+            center = linearProps.CentreOfMass();
+            hasCenter = true;
+        }
+
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"shapeType\":"; appendJsonString(ss, shapeTypeName(shape.ShapeType())); ss << ",";
+        ss << "\"solidCount\":" << solids.Extent() << ",";
+        ss << "\"shellCount\":" << shells.Extent() << ",";
+        ss << "\"wireCount\":" << wires.Extent() << ",";
+        ss << "\"faceCount\":" << faces.Extent() << ",";
+        ss << "\"edgeCount\":" << edges.Extent() << ",";
+        ss << "\"vertexCount\":" << vertices.Extent() << ",";
+        ss << "\"boundingBox\":{";
+        ss << "\"xMin\":" << bounds[0] << ",";
+        ss << "\"yMin\":" << bounds[1] << ",";
+        ss << "\"zMin\":" << bounds[2] << ",";
+        ss << "\"xMax\":" << bounds[3] << ",";
+        ss << "\"yMax\":" << bounds[4] << ",";
+        ss << "\"zMax\":" << bounds[5] << "},";
+        ss << "\"isValid\":" << (analyzer.IsValid() ? "true" : "false") << ",";
+        ss << "\"volume\":" << (solids.Extent() > 0 ? volumeProps.Mass() : 0.0) << ",";
+        ss << "\"surfaceArea\":" << surfaceProps.Mass() << ",";
+        ss << "\"linearLength\":" << linearProps.Mass() << ",";
+        ss << "\"centerOfMass\":";
+        if (hasCenter) {
+            appendPointJson(ss, center);
+        } else {
+            ss << "null";
+        }
+        ss << ",\"centerOfMassBasis\":"; appendJsonString(ss, basis); ss << "}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return "{}";
+}
+
+std::string OcctKernel::classifyPointContainment(uint32_t id, const std::string& pointJson, double tolerance) {
+    try {
+        if (!(tolerance > 0.0) || !std::isfinite(tolerance)) {
+            throwKernelError("INVALID_PARAMS", "tolerance must be a positive finite number");
+        }
+
+        const TopoDS_Shape& shape = requireShape(id);
+        const gp_Pnt point = parsePoint3(mini_json::parse(pointJson), "point");
+
+        ShapeMap solids;
+        TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+
+        TopAbs_State finalState = TopAbs_UNKNOWN;
+        if (solids.Extent() == 0) {
+            finalState = TopAbs_UNKNOWN;
+        } else {
+            finalState = TopAbs_OUT;
+            for (int index = 1; index <= solids.Extent(); ++index) {
+                BRepClass3d_SolidClassifier classifier(TopoDS::Solid(solids(index)), point, tolerance);
+                const TopAbs_State state = classifier.State();
+                if (state == TopAbs_IN) {
+                    finalState = TopAbs_IN;
+                    break;
+                }
+                if (state == TopAbs_ON) {
+                    finalState = TopAbs_ON;
+                } else if (state == TopAbs_UNKNOWN && finalState != TopAbs_ON) {
+                    finalState = TopAbs_UNKNOWN;
+                }
+            }
+        }
+
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"point\":"; appendPointJson(ss, point); ss << ",";
+        ss << "\"tolerance\":" << tolerance << ",";
+        ss << "\"state\":"; appendJsonString(ss, containmentStateName(finalState)); ss << ",";
+        ss << "\"isInside\":" << ((finalState == TopAbs_IN || finalState == TopAbs_ON) ? "true" : "false");
+        ss << "}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return "{}";
+}
+
+std::string OcctKernel::intersectShapes(uint32_t id1, uint32_t id2) {
+    const std::string operation = "intersectShapes";
+    try {
+        auto sourceIt1 = _impl->records.find(id1);
+        auto sourceIt2 = _impl->records.find(id2);
+        if (sourceIt1 == _impl->records.end() || sourceIt2 == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "IntersectShapes requires valid resident handles");
+        }
+
+        BRepAlgoAPI_Section section(sourceIt1->second.shape, sourceIt2->second.shape, false);
+        section.Build();
+        if (!section.IsDone()) {
+            throwStructuredOperationError(operation, "Section operation failed");
+        }
+
+        const TopoDS_Shape result = section.Shape();
+        ShapeMap edges;
+        ShapeMap vertices;
+        if (!result.IsNull()) {
+            TopExp::MapShapes(result, TopAbs_EDGE, edges);
+            TopExp::MapShapes(result, TopAbs_VERTEX, vertices);
+        }
+
+        const bool hasIntersection = !result.IsNull() && (edges.Extent() > 0 || vertices.Extent() > 0);
+        uint32_t sectionShapeId = 0;
+        if (hasIntersection) {
+            sectionShapeId = storeShapeWithMetadata(result,
+                                                   "intersectShapes",
+                                                   "shapeA=" + sourceIt1->second.revision.revisionId + ";shapeB=" + sourceIt2->second.revision.revisionId,
+                                                   { sourceIt1->second.revision.revisionId, sourceIt2->second.revision.revisionId },
+                                                   "generated",
+                                                   "generated",
+                                                   {});
+        }
+
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"hasIntersection\":" << (hasIntersection ? "true" : "false") << ",";
+        ss << "\"edgeCount\":" << edges.Extent() << ",";
+        ss << "\"vertexCount\":" << vertices.Extent();
+        if (sectionShapeId != 0) {
+            ss << ",\"sectionShapeId\":" << sectionShapeId;
+        }
+        ss << "}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return "{}";
+}
+
+std::string OcctKernel::findClosestPointOnShape(uint32_t id, const std::string& pointJson, double tolerance) {
+    const std::string operation = "findClosestPointOnShape";
+    try {
+        if (!(tolerance > 0.0) || !std::isfinite(tolerance)) {
+            throwKernelError("INVALID_PARAMS", "tolerance must be a positive finite number");
+        }
+
+        auto sourceIt = _impl->records.find(id);
+        if (sourceIt == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
+
+        const gp_Pnt queryPoint = parsePoint3(mini_json::parse(pointJson), "point");
+        const TopoDS_Vertex queryVertex = BRepBuilderAPI_MakeVertex(queryPoint);
+
+        BRepExtrema_DistShapeShape extrema;
+        extrema.SetDeflection(tolerance);
+        extrema.LoadS1(queryVertex);
+        extrema.LoadS2(sourceIt->second.shape);
+        if (!extrema.Perform() || !extrema.IsDone() || extrema.NbSolution() < 1) {
+            throwStructuredOperationError(operation, "Closest-point query failed");
+        }
+
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"queryPoint\":"; appendPointJson(ss, queryPoint); ss << ",";
+        ss << "\"closestPoint\":"; appendPointJson(ss, extrema.PointOnShape2(1)); ss << ",";
+        ss << "\"distance\":" << extrema.Value() << ",";
+        ss << "\"solutionCount\":" << extrema.NbSolution() << ",";
+        ss << "\"support\":";
+
+        const BRepExtrema_SupportType supportType = extrema.SupportTypeShape2(1);
+        switch (supportType) {
+        case BRepExtrema_IsVertex:
+            appendSupportRefJson(ss, sourceIt->second, extrema.SupportOnShape2(1), supportType);
+            break;
+        case BRepExtrema_IsOnEdge: {
+            double parameter = 0.0;
+            extrema.ParOnEdgeS2(1, parameter);
+            appendSupportRefJson(ss, sourceIt->second, extrema.SupportOnShape2(1), supportType, true, parameter);
+            break;
+        }
+        case BRepExtrema_IsInFace: {
+            double u = 0.0;
+            double v = 0.0;
+            extrema.ParOnFaceS2(1, u, v);
+            appendSupportRefJson(ss, sourceIt->second, extrema.SupportOnShape2(1), supportType, false, 0.0, true, u, v);
+            break;
+        }
+        }
+
+        ss << "}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return "{}";
+}
+
+std::string OcctKernel::measureShapeDistance(uint32_t id1, uint32_t id2, double tolerance) {
+    const std::string operation = "measureShapeDistance";
+    try {
+        if (!(tolerance > 0.0) || !std::isfinite(tolerance)) {
+            throwKernelError("INVALID_PARAMS", "tolerance must be a positive finite number");
+        }
+
+        auto sourceIt1 = _impl->records.find(id1);
+        auto sourceIt2 = _impl->records.find(id2);
+        if (sourceIt1 == _impl->records.end() || sourceIt2 == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "MeasureShapeDistance requires valid resident handles");
+        }
+
+        BRepExtrema_DistShapeShape extrema;
+        extrema.SetDeflection(tolerance);
+        extrema.LoadS1(sourceIt1->second.shape);
+        extrema.LoadS2(sourceIt2->second.shape);
+        if (!extrema.Perform() || !extrema.IsDone()) {
+            throwStructuredOperationError(operation, "Shape-distance query failed");
+        }
+
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"distance\":" << extrema.Value() << ",";
+        ss << "\"clearance\":" << extrema.Value() << ",";
+        ss << "\"innerSolution\":" << (extrema.InnerSolution() ? "true" : "false") << ",";
+        ss << "\"isInContact\":" << (extrema.Value() <= tolerance ? "true" : "false") << ",";
+        ss << "\"solutionCount\":" << extrema.NbSolution() << ",";
+        ss << "\"solutions\":[";
+
+        for (int index = 1; index <= extrema.NbSolution(); ++index) {
+            if (index > 1) {
+                ss << ",";
+            }
+            ss << "{";
+            ss << "\"pointOnA\":"; appendPointJson(ss, extrema.PointOnShape1(index)); ss << ",";
+            ss << "\"pointOnB\":"; appendPointJson(ss, extrema.PointOnShape2(index)); ss << ",";
+            ss << "\"supportOnA\":";
+            const BRepExtrema_SupportType supportTypeA = extrema.SupportTypeShape1(index);
+            switch (supportTypeA) {
+            case BRepExtrema_IsVertex:
+                appendSupportRefJson(ss, sourceIt1->second, extrema.SupportOnShape1(index), supportTypeA);
+                break;
+            case BRepExtrema_IsOnEdge: {
+                double parameter = 0.0;
+                extrema.ParOnEdgeS1(index, parameter);
+                appendSupportRefJson(ss, sourceIt1->second, extrema.SupportOnShape1(index), supportTypeA, true, parameter);
+                break;
+            }
+            case BRepExtrema_IsInFace: {
+                double u = 0.0;
+                double v = 0.0;
+                extrema.ParOnFaceS1(index, u, v);
+                appendSupportRefJson(ss, sourceIt1->second, extrema.SupportOnShape1(index), supportTypeA, false, 0.0, true, u, v);
+                break;
+            }
+            }
+            ss << ",\"supportOnB\":";
+            const BRepExtrema_SupportType supportTypeB = extrema.SupportTypeShape2(index);
+            switch (supportTypeB) {
+            case BRepExtrema_IsVertex:
+                appendSupportRefJson(ss, sourceIt2->second, extrema.SupportOnShape2(index), supportTypeB);
+                break;
+            case BRepExtrema_IsOnEdge: {
+                double parameter = 0.0;
+                extrema.ParOnEdgeS2(index, parameter);
+                appendSupportRefJson(ss, sourceIt2->second, extrema.SupportOnShape2(index), supportTypeB, true, parameter);
+                break;
+            }
+            case BRepExtrema_IsInFace: {
+                double u = 0.0;
+                double v = 0.0;
+                extrema.ParOnFaceS2(index, u, v);
+                appendSupportRefJson(ss, sourceIt2->second, extrema.SupportOnShape2(index), supportTypeB, false, 0.0, true, u, v);
+                break;
+            }
+            }
+            ss << "}";
+        }
+
+        ss << "]}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return "{}";
 }
 
 bool OcctKernel::checkValidity(uint32_t id) {
@@ -4829,8 +5716,11 @@ uint32_t OcctKernel::hydrateCheckpoint(const std::string& checkpointJson) {
         _impl->records[id] = record;
         _impl->revisionToHandle[revision.revisionId] = id;
         return id;
-    } catch (const std::runtime_error&) {
-        throw;
+    } catch (const std::runtime_error& error) {
+        if (looksLikeKernelErrorJson(error.what())) {
+            throw;
+        }
+        throwKernelError("INVALID_CHECKPOINT", error.what());
     } catch (const Standard_Failure& sf) {
         throwKernelError("IMPORT_FAILED", sf.what());
     }

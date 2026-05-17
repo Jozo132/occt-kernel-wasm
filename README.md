@@ -28,11 +28,13 @@ It is designed to be consumed by modelling applications focused on SolidWorks-li
 | Structured native blend specs  | ✅     |
 | Structured sketch feature specs | ✅    |
 | Exact edge/face interrogation  | ✅     |
-| Topology query (faces/edges/vertices/bbox) | ✅ |
+| Exact analysis + point containment | ✅ |
+| Topology query (solids/shells/wires/faces/edges/vertices/bbox) | ✅ |
 | Validity check                | ✅     |
 | Tessellation for WebGL        | ✅     |
 | STEP import                   | ✅     |
 | STEP export                   | ✅     |
+| Version + session metadata    | ✅     |
 | Structured error objects      | ✅     |
 | Browser + Node.js support     | ✅     |
 
@@ -56,7 +58,7 @@ import { createKernel } from 'occt-kernel-wasm';
 const kernel = await createKernel();
 ```
 
-All shapes are represented by opaque `ShapeHandle` objects (`{ id: number }`). No OCCT types are ever exposed.
+All shapes are represented by opaque `ShapeHandle` objects (`{ id: number, sessionId: string }`). Resident handles are valid only inside the kernel session that created them; passing a handle to a different kernel instance throws `SESSION_MISMATCH`. No OCCT types are ever exposed.
 
 ### Primitives
 
@@ -483,9 +485,13 @@ const topo = kernel.getTopology(box);
 //   revisionId: 'rev_...', topologyHash: 'T:...', historySchemaVersion: 1,
 //   operationId: 'op_...', operationType: 'createBox', operandRevisionIds: [],
 //   identityStatus: 'generated', historyWarnings: [],
+//   shapeType: 'solid', solidCount: 1, shellCount: 1, wireCount: 6,
 //   faceCount: 6, edgeCount: 12, vertexCount: 8,
 //   boundingBox: { xMin: 0, yMin: 0, zMin: 0, xMax: 100, yMax: 50, zMax: 25 },
 //   isValid: true,
+//   solids: [{ id: 1, shellIds: [1], status: 'generated' }],
+//   shells: [{ id: 1, solidIds: [1], faceIds: [1, 2, 3, 4, 5, 6], status: 'generated' }],
+//   wires: [{ id: 1, edgeIds: [1, 2, 3, 4], topoFaceIds: [1], status: 'generated' }],
 //   faces: [{ id: 1, stableHash: 'F:...', status: 'generated' }],
 //   edges: [{ id: 1, stableHash: 'E:...', topoFaceIds: [1, 2], status: 'generated' }],
 //   vertices: [{ id: 1, stableHash: 'V:...', status: 'generated' }],
@@ -493,17 +499,97 @@ const topo = kernel.getTopology(box);
 // }
 
 const capabilities = kernel.getCapabilities();
-// featureEdgesV1, triangleNormalsV1, topologySubshapesV1, historyV1,
+// featureEdgesV1, topologyHierarchyV1, versionInfoV1, analysisV1,
+// sessionHandlesV1, triangleNormalsV1, topologySubshapesV1, historyV1,
 // entityRemapV1, revisionRetentionV1, checkpointV1, and native exact blend
-// operations are available. capabilities.fillet / capabilities.chamfer
-// describe supported modes and explicitly false unsupported modes.
-// stableNamingV1 remains false until full semantic naming for booleans,
-// fillets/chamfers, and healed imports is proven beyond geometry-derived ids.
+// operations are available. capabilities.analysis and capabilities.runtime
+// describe exact mass/containment support and browser/worker/node coverage.
+// capabilities.fillet / capabilities.chamfer describe supported modes and
+// explicitly false unsupported modes.
+// stableNamingV1 is true: semantic face/edge/vertex ids are materialized per
+// revision and propagated through exact transform, boolean, and blend history
+// instead of falling back to geometry-derived hashes.
 
 const schema = kernel.getOperationSchema();
 // Versioned machine-readable operation contracts for structured extrude,
-// revolve, sweep, loft, fillet, chamfer, evaluateEdge, sampleEdge,
-// getEdgeCurve, and evaluateFace.
+// revolve, sweep, loft, fillet, chamfer, getVersionInfo, analyzeShape,
+// classifyPointContainment, intersectShapes, findClosestPointOnShape,
+// measureShapeDistance, evaluateEdge, sampleEdge, getEdgeCurve, and
+// evaluateFace.
+```
+
+### Version metadata and exact analysis
+
+```ts
+const version = kernel.getVersionInfo();
+// {
+//   libraryVersion: '1.0.0',
+//   apiVersion: 1,
+//   kernelVersion: '8.0.0',
+//   checkpointSchemaVersion: 1,
+//   operationSchemaVersion: 1,
+//   sessionId: 'session_...',
+//   supportedRuntimes: ['browser', 'worker', 'node']
+// }
+
+const analysis = kernel.analyzeShape({ shape: box });
+// {
+//   shapeType: 'solid',
+//   solidCount: 1,
+//   shellCount: 1,
+//   wireCount: 6,
+//   faceCount: 6,
+//   edgeCount: 12,
+//   vertexCount: 8,
+//   boundingBox: { xMin: 0, yMin: 0, zMin: 0, xMax: 100, yMax: 50, zMax: 25 },
+//   isValid: true,
+//   volume: 125000,
+//   surfaceArea: 25000,
+//   linearLength: 700,
+//   centerOfMass: [50, 25, 12.5],
+//   centerOfMassBasis: 'volume'
+// }
+
+const inside = kernel.classifyPointContainment({
+    shape: box,
+    point: [50, 25, 12.5],
+});
+// { point: [50, 25, 12.5], tolerance: 1e-7, state: 'in', isInside: true }
+
+const closest = kernel.findClosestPointOnShape({
+    shape: box,
+    point: [140, 25, 12.5],
+});
+// {
+//   queryPoint: [140, 25, 12.5],
+//   closestPoint: [100, 25, 12.5],
+//   distance: 40,
+//   support: { kind: 'face', topoId: 2, stableHash: 'F:...' }
+// }
+
+const moved = kernel.transformShape({
+    shape: box,
+    transform: { translation: [140, 0, 0] },
+});
+
+const clearance = kernel.measureShapeDistance({
+    shapeA: box,
+    shapeB: moved,
+});
+// {
+//   distance: 40,
+//   clearance: 40,
+//   isInContact: false,
+//   solutions: [{ pointOnA: [100, 25, 12.5], pointOnB: [140, 25, 12.5], ... }]
+// }
+
+const overlap = kernel.transformShape({
+    shape: box,
+    transform: { translation: [50, 10, 0] },
+});
+
+const section = kernel.intersectShapes({ shapeA: box, shapeB: overlap });
+// { hasIntersection: true, edgeCount: 4, vertexCount: 4, sectionShape: { id: ..., sessionId: ... } }
 ```
 
 ### Revision history, remap, and checkpoints

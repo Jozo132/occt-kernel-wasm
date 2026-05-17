@@ -153,6 +153,24 @@ public:
     /// Return capability flags for additive API contracts exposed by this build.
     std::string getCapabilities() const;
 
+    /// Return native kernel and schema version metadata.
+    std::string getKernelVersionInfo() const;
+
+    /// Return exact OCCT analysis properties for a resident shape.
+    std::string analyzeShape(uint32_t id);
+
+    /// Classify a world-space point against the exact resident solid model.
+    std::string classifyPointContainment(uint32_t id, const std::string& pointJson, double tolerance);
+
+    /// Build the exact section curves and vertices between two resident shapes.
+    std::string intersectShapes(uint32_t id1, uint32_t id2);
+
+    /// Return the closest point on a resident shape to a world-space query point.
+    std::string findClosestPointOnShape(uint32_t id, const std::string& pointJson, double tolerance);
+
+    /// Return the exact minimum distance / clearance between two resident shapes.
+    std::string measureShapeDistance(uint32_t id1, uint32_t id2, double tolerance);
+
     bool checkValidity(uint32_t id);
 
     // -----------------------------------------------------------------------

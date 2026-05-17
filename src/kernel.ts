@@ -18,6 +18,13 @@
  */
 
 import { KernelError, parseNativeError } from './errors';
+import {
+    API_VERSION,
+    CHECKPOINT_SCHEMA_VERSION,
+    LIBRARY_VERSION,
+    OPERATION_SCHEMA_VERSION,
+    SUPPORTED_RUNTIMES,
+} from './version';
 import type {
     BooleanParams,
     BlendOperationResult,
@@ -25,6 +32,8 @@ import type {
     BoxParams,
     ChamferFeatureParams,
     ChamferParams,
+    ClosestPointOnShapeParams,
+    ClosestPointOnShapeResult,
     CreateCheckpointParams,
     CylinderParams,
     DisposeParams,
@@ -48,12 +57,15 @@ import type {
     ImportStepDetailedResult,
     ImportStepParams,
     KernelCapabilities,
+    KernelVersionInfo,
     HydrateCheckpointParams,
     LoftFeatureParams,
     LoftSection,
     LoftSpec,
     MapEntitiesAcrossRevisionsParams,
     PlaneFrame,
+    PointContainmentParams,
+    PointContainmentResult,
     Point2,
     Point3,
     Profile,
@@ -71,6 +83,12 @@ import type {
     RotationTransform,
     SampleEdgeParams,
     ShapeHandle,
+    ShapeAnalysisParams,
+    ShapeAnalysisResult,
+    ShapeDistanceParams,
+    ShapeDistanceResult,
+    ShapeIntersectionParams,
+    ShapeIntersectionResult,
     ShapeTransform,
     SphereParams,
     SpatialCurveSegment,
@@ -128,6 +146,12 @@ export interface NativeKernel {
     evaluateFace?: (id: number, faceRefJson: string, u: number, v: number) => string;
     getOperationSchema?: () => string;
     getCapabilities?: () => string;
+    getKernelVersionInfo?: () => string;
+    analyzeShape?: (id: number) => string;
+    classifyPointContainment?: (id: number, pointJson: string, tolerance: number) => string;
+    intersectShapes?: (id1: number, id2: number) => string;
+    findClosestPointOnShape?: (id: number, pointJson: string, tolerance: number) => string;
+    measureShapeDistance?: (id1: number, id2: number, tolerance: number) => string;
     checkValidity(id: number): boolean;
     tessellate(id: number, linearDeflection: number, angularDeflection: number): string;
     importStep(content: string): number;
@@ -151,13 +175,35 @@ export interface WasmModule {
     OcctKernel: new () => NativeKernel;
 }
 
+type ResolveShapeId = (shape: ShapeHandle, name: string) => number;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /** Make a {@link ShapeHandle} from a raw integer. */
-function makeHandle(id: number): ShapeHandle {
-    return Object.freeze({ id });
+let sessionCounter = 0;
+
+function createSessionId(): string {
+    sessionCounter += 1;
+    return `session_${Date.now().toString(36)}_${sessionCounter.toString(36)}`;
+}
+
+function makeHandle(id: number, sessionId: string): ShapeHandle {
+    return Object.freeze({ id, sessionId });
+}
+
+function resolveShapeId(shape: ShapeHandle, sessionId: string, name: string): number {
+    if (!Number.isInteger(shape.id) || shape.id <= 0) {
+        throw new KernelError('INVALID_HANDLE', `${name} must contain a positive integer id`);
+    }
+    if (typeof shape.sessionId !== 'string' || shape.sessionId.length === 0) {
+        throw new KernelError('INVALID_HANDLE', `${name} was not created by a valid kernel session`);
+    }
+    if (shape.sessionId !== sessionId) {
+        throw new KernelError('SESSION_MISMATCH', `${name} belongs to kernel session ${shape.sessionId}, not ${sessionId}`);
+    }
+    return shape.id;
 }
 
 /**
@@ -277,10 +323,10 @@ function requireFaceRef(value: FaceRef, name: string): void {
     requireEdgeRef(value, name);
 }
 
-function withShapeHandle(result: Omit<BlendOperationResult, 'shape'>): BlendOperationResult {
+function withShapeHandle(result: Omit<BlendOperationResult, 'shape'>, sessionId: string): BlendOperationResult {
     return {
         ...result,
-        shape: makeHandle(result.shapeId),
+        shape: makeHandle(result.shapeId, sessionId),
     };
 }
 
@@ -355,11 +401,31 @@ interface RawTopology {
     topologyHash?: string;
     historySchemaVersion?: number;
     createdFromCheckpoint?: boolean;
+    shapeType?: string;
+    solidCount?: number;
+    shellCount?: number;
+    wireCount?: number;
     faceCount: number;
     edgeCount: number;
     vertexCount: number;
     boundingBox: BoundingBox;
     isValid: boolean;
+}
+
+interface RawKernelVersionInfo {
+    kernelVersion: string;
+    kernelVersionMajor: number;
+    kernelVersionMinor: number;
+    kernelVersionMaintenance: number;
+    checkpointSchemaVersion?: number;
+    operationSchemaVersion?: number;
+}
+
+interface RawShapeIntersectionResult {
+    hasIntersection: boolean;
+    edgeCount: number;
+    vertexCount: number;
+    sectionShapeId?: number;
 }
 
 const fallbackCapabilities: KernelCapabilities = {
@@ -368,6 +434,7 @@ const fallbackCapabilities: KernelCapabilities = {
     triangleNormalsV1: false,
     triangleFaceMappingV1: false,
     topologySubshapesV1: false,
+    topologyHierarchyV1: false,
     geometricStableHashesV1: false,
     revisionInfoV1: false,
     entityResolutionV1: false,
@@ -376,6 +443,9 @@ const fallbackCapabilities: KernelCapabilities = {
     historyV1: false,
     stableNamingV1: false,
     checkpointV1: false,
+    versionInfoV1: false,
+    analysisV1: false,
+    sessionHandlesV1: false,
 };
 
 interface RawStepImportMessage extends StepImportMessage {}
@@ -427,14 +497,14 @@ function formatImportFailure(result: ImportStepDetailedResult): string {
     return `STEP import failed (${result.readStatus}/${result.transferStatus})`;
 }
 
-function toImportStepDetailedResult(raw: RawStepImportDetailedResult): ImportStepDetailedResult {
+function toImportStepDetailedResult(raw: RawStepImportDetailedResult, sessionId: string): ImportStepDetailedResult {
     return {
         readStatus: raw.readStatus,
         transferStatus: raw.transferStatus,
         rootCount: raw.rootCount,
         transferredRootCount: raw.transferredRootCount,
         messageList: raw.messageList,
-        ...(raw.shapeId !== undefined ? { shape: makeHandle(raw.shapeId) } : {}),
+        ...(raw.shapeId !== undefined ? { shape: makeHandle(raw.shapeId, sessionId) } : {}),
         isValid: raw.isValid,
         wasValidBeforeHealing: raw.wasValidBeforeHealing,
         healed: raw.healed,
@@ -712,7 +782,7 @@ function normalizeExtrudeOptions(params: ExtrudeParams): ExtrudeOptionsPayload {
     };
 }
 
-function normalizeExtrudeProfileSpec(spec: ExtrudeProfileSpec): ExtrudeProfileSpecPayload {
+function normalizeExtrudeProfileSpec(spec: ExtrudeProfileSpec, getShapeId?: ResolveShapeId): ExtrudeProfileSpecPayload {
     requireSchemaVersion(spec, 'extrude spec');
 
     const unit = spec.unit !== undefined
@@ -760,7 +830,9 @@ function normalizeExtrudeProfileSpec(spec: ExtrudeProfileSpec): ExtrudeProfileSp
     }
 
     const normalizeSurface = (name: string, surface: { readonly shape?: ShapeHandle; readonly face: FaceRef }) => ({
-        ...(surface.shape !== undefined ? { shapeId: surface.shape.id } : {}),
+        ...(surface.shape !== undefined
+            ? { shapeId: getShapeId ? getShapeId(surface.shape, `${name}.shape`) : surface.shape.id }
+            : {}),
         face: (() => {
             requireFaceRef(surface.face, `${name}.face`);
             return { ...surface.face };
@@ -813,9 +885,12 @@ function normalizeExtrudeProfileSpec(spec: ExtrudeProfileSpec): ExtrudeProfileSp
 function normalizeSurfaceTarget(
     name: string,
     surface: { readonly shape?: ShapeHandle; readonly face: FaceRef },
+    getShapeId?: ResolveShapeId,
 ): { shapeId?: number; face: FaceRef } {
     return {
-        ...(surface.shape !== undefined ? { shapeId: surface.shape.id } : {}),
+        ...(surface.shape !== undefined
+            ? { shapeId: getShapeId ? getShapeId(surface.shape, `${name}.shape`) : surface.shape.id }
+            : {}),
         face: (() => {
             requireFaceRef(surface.face, `${name}.face`);
             return { ...surface.face };
@@ -852,7 +927,7 @@ function normalizeRevolveAngleRadians(
     return (angleDegrees as number) * Math.PI / 180;
 }
 
-function normalizeRevolveProfileSpec(spec: RevolveProfileSpec): RevolveProfileSpecPayload {
+function normalizeRevolveProfileSpec(spec: RevolveProfileSpec, getShapeId?: ResolveShapeId): RevolveProfileSpecPayload {
     requireSchemaVersion(spec, 'revolve spec');
 
     const unit = spec.unit !== undefined
@@ -909,20 +984,20 @@ function normalizeRevolveProfileSpec(spec: RevolveProfileSpec): RevolveProfileSp
             case 'upToSurface':
                 return {
                     type: 'upToSurface' as const,
-                    surface: normalizeSurfaceTarget('spec.extent.surface', spec.extent.surface),
+                    surface: normalizeSurfaceTarget('spec.extent.surface', spec.extent.surface, getShapeId),
                 };
             case 'fromSurfaceToSurface':
                 return {
                     type: 'fromSurfaceToSurface' as const,
-                    fromSurface: normalizeSurfaceTarget('spec.extent.fromSurface', spec.extent.fromSurface),
-                    untilSurface: normalizeSurfaceTarget('spec.extent.untilSurface', spec.extent.untilSurface),
+                    fromSurface: normalizeSurfaceTarget('spec.extent.fromSurface', spec.extent.fromSurface, getShapeId),
+                    untilSurface: normalizeSurfaceTarget('spec.extent.untilSurface', spec.extent.untilSurface, getShapeId),
                 };
             case 'throughAll':
                 return { type: 'throughAll' as const };
             case 'upToSurfaceAtAngle':
                 return {
                     type: 'upToSurfaceAtAngle' as const,
-                    surface: normalizeSurfaceTarget('spec.extent.surface', spec.extent.surface),
+                    surface: normalizeSurfaceTarget('spec.extent.surface', spec.extent.surface, getShapeId),
                     angleRadians: normalizeRevolveAngleRadians('spec.extent', spec.extent.angleRadians, spec.extent.angleDegrees),
                 };
             default:
@@ -1189,10 +1264,20 @@ function normalizeShapeTransform(transform: ShapeTransform): ShapeTransform {
  */
 export class OcctKernel {
     private readonly _native: NativeKernel;
+    private readonly _sessionId: string;
 
     /** @internal – use {@link createKernel} instead. */
     constructor(wasmModule: WasmModule) {
         this._native = new wasmModule.OcctKernel();
+        this._sessionId = createSessionId();
+    }
+
+    private makeHandle(id: number): ShapeHandle {
+        return makeHandle(id, this._sessionId);
+    }
+
+    private shapeId(shape: ShapeHandle, name = 'shape'): number {
+        return resolveShapeId(shape, this._sessionId, name);
     }
 
     // -----------------------------------------------------------------------
@@ -1204,20 +1289,20 @@ export class OcctKernel {
         requirePositive(params.dx, 'dx');
         requirePositive(params.dy, 'dy');
         requirePositive(params.dz, 'dz');
-        return makeHandle(wrap(() => this._native.createBox(params.dx, params.dy, params.dz)));
+        return this.makeHandle(wrap(() => this._native.createBox(params.dx, params.dy, params.dz)));
     }
 
     /** Create a solid cylinder with its axis along +Z, base centred at the origin. */
     createCylinder(params: CylinderParams): ShapeHandle {
         requirePositive(params.radius, 'radius');
         requirePositive(params.height, 'height');
-        return makeHandle(wrap(() => this._native.createCylinder(params.radius, params.height)));
+        return this.makeHandle(wrap(() => this._native.createCylinder(params.radius, params.height)));
     }
 
     /** Create a solid sphere centred at the origin. */
     createSphere(params: SphereParams): ShapeHandle {
         requirePositive(params.radius, 'radius');
-        return makeHandle(wrap(() => this._native.createSphere(params.radius)));
+        return this.makeHandle(wrap(() => this._native.createSphere(params.radius)));
     }
 
     // -----------------------------------------------------------------------
@@ -1230,7 +1315,7 @@ export class OcctKernel {
     extrudeProfile(params: ExtrudeParams): ShapeHandle {
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
         const optionsJson = JSON.stringify(normalizeExtrudeOptions(params));
-        return makeHandle(wrap(() => this._native.extrudeProfile(profileJson, optionsJson)));
+        return this.makeHandle(wrap(() => this._native.extrudeProfile(profileJson, optionsJson)));
     }
 
     /** Apply a versioned additive profile extrusion feature spec to a resident shape. */
@@ -1239,8 +1324,8 @@ export class OcctKernel {
             throw new KernelError('UNKNOWN', 'Native module does not support extrudeProfileWithSpec');
         }
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
-        const specJson = JSON.stringify(normalizeExtrudeProfileSpec(params.spec));
-        return makeHandle(wrap(() => this._native.extrudeProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+        const specJson = JSON.stringify(normalizeExtrudeProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
+        return this.makeHandle(wrap(() => this._native.extrudeProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
     }
 
     /** Apply a versioned subtractive profile extrusion feature spec to a resident shape. */
@@ -1249,8 +1334,8 @@ export class OcctKernel {
             throw new KernelError('UNKNOWN', 'Native module does not support extrudeCutProfileWithSpec');
         }
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
-        const specJson = JSON.stringify(normalizeExtrudeProfileSpec(params.spec));
-        return makeHandle(wrap(() => this._native.extrudeCutProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+        const specJson = JSON.stringify(normalizeExtrudeProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
+        return this.makeHandle(wrap(() => this._native.extrudeCutProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
     }
 
     /**
@@ -1259,7 +1344,7 @@ export class OcctKernel {
     revolveProfile(params: RevolveParams): ShapeHandle {
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
         const optionsJson = JSON.stringify(normalizeRevolveOptions(params));
-        return makeHandle(wrap(() => this._native.revolveProfile(profileJson, optionsJson)));
+        return this.makeHandle(wrap(() => this._native.revolveProfile(profileJson, optionsJson)));
     }
 
     /** Apply a versioned additive profile revolve feature spec to a resident shape. */
@@ -1269,16 +1354,16 @@ export class OcctKernel {
                 throw new KernelError('UNKNOWN', 'Native module does not support revolveCutProfileWithSpec');
             }
             const profileJson = JSON.stringify(normalizeProfile(params.profile));
-            const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec));
-            return makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+            const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
+            return this.makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
         }
 
         if (typeof this._native.revolveProfileWithSpec !== 'function') {
             throw new KernelError('UNKNOWN', 'Native module does not support revolveProfileWithSpec');
         }
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
-        const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec));
-        return makeHandle(wrap(() => this._native.revolveProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+        const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
+        return this.makeHandle(wrap(() => this._native.revolveProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
     }
 
     /** Apply a versioned subtractive profile revolve feature spec to a resident shape. */
@@ -1287,8 +1372,8 @@ export class OcctKernel {
             throw new KernelError('UNKNOWN', 'Native module does not support revolveCutProfileWithSpec');
         }
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
-        const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec));
-        return makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+        const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
+        return this.makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
     }
 
     /** Apply a versioned sweep feature spec to a resident shape. */
@@ -1298,7 +1383,7 @@ export class OcctKernel {
         }
         const profileJson = JSON.stringify(requireSingleWireProfile(normalizeProfile(params.profile), 'profile'));
         const specJson = JSON.stringify(normalizeSweepProfileSpec(params.spec, params.cut === true));
-        return makeHandle(wrap(() => this._native.sweepProfileWithSpec?.(params.shape.id, profileJson, specJson) ?? 0));
+        return this.makeHandle(wrap(() => this._native.sweepProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
     }
 
     /** Apply a versioned loft feature spec to a resident shape. */
@@ -1308,7 +1393,7 @@ export class OcctKernel {
         }
         const sectionsJson = JSON.stringify(normalizeLoftSections(params.sections));
         const specJson = JSON.stringify(normalizeLoftSpec(params.spec, params.cut === true));
-        return makeHandle(wrap(() => this._native.loftWithSpec?.(params.shape.id, sectionsJson, specJson) ?? 0));
+        return this.makeHandle(wrap(() => this._native.loftWithSpec?.(this.shapeId(params.shape), sectionsJson, specJson) ?? 0));
     }
 
     // -----------------------------------------------------------------------
@@ -1317,17 +1402,17 @@ export class OcctKernel {
 
     /** Compute the union of two shapes. Returns a new shape handle. */
     booleanUnion(params: BooleanParams): ShapeHandle {
-        return makeHandle(wrap(() => this._native.booleanUnion(params.base.id, params.tool.id)));
+        return this.makeHandle(wrap(() => this._native.booleanUnion(this.shapeId(params.base, 'base'), this.shapeId(params.tool, 'tool'))));
     }
 
     /** Subtract `tool` from `base`. Returns a new shape handle. */
     booleanSubtract(params: BooleanParams): ShapeHandle {
-        return makeHandle(wrap(() => this._native.booleanSubtract(params.base.id, params.tool.id)));
+        return this.makeHandle(wrap(() => this._native.booleanSubtract(this.shapeId(params.base, 'base'), this.shapeId(params.tool, 'tool'))));
     }
 
     /** Compute the intersection of two shapes. Returns a new shape handle. */
     booleanIntersect(params: BooleanParams): ShapeHandle {
-        return makeHandle(wrap(() => this._native.booleanIntersect(params.base.id, params.tool.id)));
+        return this.makeHandle(wrap(() => this._native.booleanIntersect(this.shapeId(params.base, 'base'), this.shapeId(params.tool, 'tool'))));
     }
 
     // -----------------------------------------------------------------------
@@ -1340,7 +1425,7 @@ export class OcctKernel {
      */
     filletEdges(params: FilletParams): ShapeHandle {
         requirePositive(params.radius, 'radius');
-        return makeHandle(wrap(() => this._native.filletEdges(params.shape.id, params.radius)));
+        return this.makeHandle(wrap(() => this._native.filletEdges(this.shapeId(params.shape), params.radius)));
     }
 
     /**
@@ -1349,7 +1434,7 @@ export class OcctKernel {
      */
     chamferEdges(params: ChamferParams): ShapeHandle {
         requirePositive(params.distance, 'distance');
-        return makeHandle(wrap(() => this._native.chamferEdges(params.shape.id, params.distance)));
+        return this.makeHandle(wrap(() => this._native.chamferEdges(this.shapeId(params.shape), params.distance)));
     }
 
     /** Apply a versioned native OCCT fillet spec and return exact blend lineage. */
@@ -1366,8 +1451,8 @@ export class OcctKernel {
                 requireSupportedBlendControls('filletEdges', `fillet.edges[${index}]`, entry);
             });
         }
-        const raw = wrap(() => this._native.filletEdgesWithSpec?.(params.shape.id, JSON.stringify(params.spec)) ?? '{}');
-        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'fillet result'));
+        const raw = wrap(() => this._native.filletEdgesWithSpec?.(this.shapeId(params.shape), JSON.stringify(params.spec)) ?? '{}');
+        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'fillet result'), this._sessionId);
     }
 
     /** Apply a versioned native OCCT chamfer spec and return exact blend lineage. */
@@ -1390,8 +1475,8 @@ export class OcctKernel {
                 }
             });
         }
-        const raw = wrap(() => this._native.chamferEdgesWithSpec?.(params.shape.id, JSON.stringify(params.spec)) ?? '{}');
-        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'chamfer result'));
+        const raw = wrap(() => this._native.chamferEdgesWithSpec?.(this.shapeId(params.shape), JSON.stringify(params.spec)) ?? '{}');
+        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'chamfer result'), this._sessionId);
     }
 
     /**
@@ -1400,7 +1485,7 @@ export class OcctKernel {
      */
     transformShape(params: TransformParams): ShapeHandle {
         const transformJson = JSON.stringify(normalizeShapeTransform(params.transform));
-        return makeHandle(wrap(() => this._native.transformShape(params.shape.id, transformJson)));
+        return this.makeHandle(wrap(() => this._native.transformShape(this.shapeId(params.shape), transformJson)));
     }
 
     // -----------------------------------------------------------------------
@@ -1418,9 +1503,29 @@ export class OcctKernel {
         };
     }
 
+    /** Return the wrapper and native version contract for this kernel session. */
+    getVersionInfo(): KernelVersionInfo {
+        if (typeof this._native.getKernelVersionInfo !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support getKernelVersionInfo');
+        }
+        const raw = parseJson<RawKernelVersionInfo>(wrap(() => this._native.getKernelVersionInfo?.() ?? '{}'), 'version info');
+        return {
+            libraryVersion: LIBRARY_VERSION,
+            apiVersion: API_VERSION,
+            kernelVersion: raw.kernelVersion,
+            kernelVersionMajor: raw.kernelVersionMajor,
+            kernelVersionMinor: raw.kernelVersionMinor,
+            kernelVersionMaintenance: raw.kernelVersionMaintenance,
+            checkpointSchemaVersion: raw.checkpointSchemaVersion ?? CHECKPOINT_SCHEMA_VERSION,
+            operationSchemaVersion: raw.operationSchemaVersion ?? OPERATION_SCHEMA_VERSION,
+            sessionId: this._sessionId,
+            supportedRuntimes: SUPPORTED_RUNTIMES,
+        };
+    }
+
     /** Return face, edge, vertex counts, bounding box, and validity flag. */
     getTopology(shape: ShapeHandle): TopologyResult {
-        const raw = wrap(() => this._native.getTopology(shape.id));
+        const raw = wrap(() => this._native.getTopology(this.shapeId(shape)));
         return parseJson<RawTopology>(raw, 'topology');
     }
 
@@ -1429,7 +1534,7 @@ export class OcctKernel {
         if (typeof this._native.getRevisionInfo !== 'function') {
             throw new KernelError('UNKNOWN', 'Native module does not support getRevisionInfo');
         }
-        return parseJson<RevisionInfo>(wrap(() => this._native.getRevisionInfo?.(shape.id) ?? '{}'), 'revision info');
+        return parseJson<RevisionInfo>(wrap(() => this._native.getRevisionInfo?.(this.shapeId(shape)) ?? '{}'), 'revision info');
     }
 
     /** Resolve a stable face/edge/vertex hash in the current resident revision. */
@@ -1437,7 +1542,7 @@ export class OcctKernel {
         if (typeof this._native.resolveStableEntity !== 'function') {
             throw new KernelError('UNKNOWN', 'Native module does not support resolveStableEntity');
         }
-        const raw = wrap(() => this._native.resolveStableEntity?.(params.shape.id, params.stableHash) ?? '{}');
+        const raw = wrap(() => this._native.resolveStableEntity?.(this.shapeId(params.shape), params.stableHash) ?? '{}');
         return parseJson<StableEntityResolution>(raw, 'stable entity resolution');
     }
 
@@ -1461,8 +1566,84 @@ export class OcctKernel {
         }
         requireEdgeRef(params.edge, 'edge');
         requireFinite(params.t, 't');
-        const raw = wrap(() => this._native.evaluateEdge?.(params.shape.id, JSON.stringify(params.edge), params.t) ?? '{}');
+        const raw = wrap(() => this._native.evaluateEdge?.(this.shapeId(params.shape), JSON.stringify(params.edge), params.t) ?? '{}');
         return parseJson<EdgeEvaluationResult>(raw, 'edge evaluation');
+    }
+
+    /** Return exact OCCT analysis properties for a resident shape. */
+    analyzeShape(params: ShapeAnalysisParams): ShapeAnalysisResult {
+        if (typeof this._native.analyzeShape !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support analyzeShape');
+        }
+        const raw = wrap(() => this._native.analyzeShape?.(this.shapeId(params.shape)) ?? '{}');
+        return parseJson<ShapeAnalysisResult>(raw, 'shape analysis');
+    }
+
+    /** Classify a world-space point against the exact resident solid model. */
+    classifyPointContainment(params: PointContainmentParams): PointContainmentResult {
+        if (typeof this._native.classifyPointContainment !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support classifyPointContainment');
+        }
+        requirePoint3(params.point, 'point');
+        const tolerance = params.tolerance ?? 1e-7;
+        requirePositive(tolerance, 'tolerance');
+        const raw = wrap(() => this._native.classifyPointContainment?.(
+            this.shapeId(params.shape),
+            JSON.stringify(params.point),
+            tolerance,
+        ) ?? '{}');
+        return parseJson<PointContainmentResult>(raw, 'point containment');
+    }
+
+    /** Return the exact section edges and vertices between two resident shapes. */
+    intersectShapes(params: ShapeIntersectionParams): ShapeIntersectionResult {
+        if (typeof this._native.intersectShapes !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support intersectShapes');
+        }
+        const raw = parseJson<RawShapeIntersectionResult>(wrap(() => this._native.intersectShapes?.(
+            this.shapeId(params.shapeA, 'shapeA'),
+            this.shapeId(params.shapeB, 'shapeB'),
+        ) ?? '{}'), 'shape intersection');
+        const result: ShapeIntersectionResult = {
+            hasIntersection: raw.hasIntersection,
+            edgeCount: raw.edgeCount,
+            vertexCount: raw.vertexCount,
+        };
+        if (raw.sectionShapeId !== undefined) {
+            return { ...result, sectionShape: makeHandle(raw.sectionShapeId, this._sessionId) };
+        }
+        return result;
+    }
+
+    /** Return the closest point on the exact resident shape to a world-space query point. */
+    findClosestPointOnShape(params: ClosestPointOnShapeParams): ClosestPointOnShapeResult {
+        if (typeof this._native.findClosestPointOnShape !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support findClosestPointOnShape');
+        }
+        requirePoint3(params.point, 'point');
+        const tolerance = params.tolerance ?? 1e-7;
+        requirePositive(tolerance, 'tolerance');
+        const raw = wrap(() => this._native.findClosestPointOnShape?.(
+            this.shapeId(params.shape),
+            JSON.stringify(params.point),
+            tolerance,
+        ) ?? '{}');
+        return parseJson<ClosestPointOnShapeResult>(raw, 'closest point query');
+    }
+
+    /** Return the exact minimum distance / clearance between two resident shapes. */
+    measureShapeDistance(params: ShapeDistanceParams): ShapeDistanceResult {
+        if (typeof this._native.measureShapeDistance !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support measureShapeDistance');
+        }
+        const tolerance = params.tolerance ?? 1e-7;
+        requirePositive(tolerance, 'tolerance');
+        const raw = wrap(() => this._native.measureShapeDistance?.(
+            this.shapeId(params.shapeA, 'shapeA'),
+            this.shapeId(params.shapeB, 'shapeB'),
+            tolerance,
+        ) ?? '{}');
+        return parseJson<ShapeDistanceResult>(raw, 'shape distance query');
     }
 
     /** Sample an exact edge curve without tessellation. */
@@ -1479,7 +1660,7 @@ export class OcctKernel {
             normalized: params.normalized,
             includeTangents: params.includeTangents,
         };
-        const raw = wrap(() => this._native.sampleEdge?.(params.shape.id, JSON.stringify(params.edge), JSON.stringify(options)) ?? '{}');
+        const raw = wrap(() => this._native.sampleEdge?.(this.shapeId(params.shape), JSON.stringify(params.edge), JSON.stringify(options)) ?? '{}');
         return parseJson<EdgeSampleResult>(raw, 'edge samples');
     }
 
@@ -1489,7 +1670,7 @@ export class OcctKernel {
             throw new KernelError('UNKNOWN', 'Native module does not support getEdgeCurve');
         }
         requireEdgeRef(params.edge, 'edge');
-        const raw = wrap(() => this._native.getEdgeCurve?.(params.shape.id, JSON.stringify(params.edge)) ?? '{}');
+        const raw = wrap(() => this._native.getEdgeCurve?.(this.shapeId(params.shape), JSON.stringify(params.edge)) ?? '{}');
         return parseJson<EdgeCurveResult>(raw, 'edge curve');
     }
 
@@ -1501,7 +1682,7 @@ export class OcctKernel {
         requireFaceRef(params.face, 'face');
         requireFinite(params.u, 'u');
         requireFinite(params.v, 'v');
-        const raw = wrap(() => this._native.evaluateFace?.(params.shape.id, JSON.stringify(params.face), params.u, params.v) ?? '{}');
+        const raw = wrap(() => this._native.evaluateFace?.(this.shapeId(params.shape), JSON.stringify(params.face), params.u, params.v) ?? '{}');
         return parseJson<FaceEvaluationResult>(raw, 'face evaluation');
     }
 
@@ -1515,7 +1696,7 @@ export class OcctKernel {
 
     /** Return true when the shape is geometrically and topologically valid. */
     checkValidity(shape: ShapeHandle): boolean {
-        return wrap(() => this._native.checkValidity(shape.id));
+        return wrap(() => this._native.checkValidity(this.shapeId(shape)));
     }
 
     // -----------------------------------------------------------------------
@@ -1534,7 +1715,7 @@ export class OcctKernel {
         requirePositive(linearDeflection, 'linearDeflection');
         requirePositive(angularDeflection, 'angularDeflection');
 
-        const raw = wrap(() => this._native.tessellate(params.shape.id, linearDeflection, angularDeflection));
+        const raw = wrap(() => this._native.tessellate(this.shapeId(params.shape), linearDeflection, angularDeflection));
         const data = parseJson<RawTessellation>(raw, 'tessellation');
 
         return {
@@ -1603,7 +1784,7 @@ export class OcctKernel {
             options.sewingTolerance,
         ));
 
-        return toImportStepDetailedResult(parseJson<RawStepImportDetailedResult>(raw, 'STEP import'));
+        return toImportStepDetailedResult(parseJson<RawStepImportDetailedResult>(raw, 'STEP import'), this._sessionId);
     }
 
     /**
@@ -1611,7 +1792,7 @@ export class OcctKernel {
      * Throws {@link KernelError} with code `EXPORT_FAILED` on failure.
      */
     exportStep(params: ExportStepParams): string {
-        return wrap(() => this._native.exportStep(params.shape.id));
+        return wrap(() => this._native.exportStep(this.shapeId(params.shape)));
     }
 
     /** Create a JSON checkpoint containing CBREP plus revision/history metadata. */
@@ -1619,7 +1800,7 @@ export class OcctKernel {
         if (typeof this._native.createCheckpoint !== 'function') {
             throw new KernelError('UNKNOWN', 'Native module does not support createCheckpoint');
         }
-        return parseJson<RevisionCheckpoint>(wrap(() => this._native.createCheckpoint?.(params.shape.id) ?? '{}'), 'checkpoint');
+        return parseJson<RevisionCheckpoint>(wrap(() => this._native.createCheckpoint?.(this.shapeId(params.shape)) ?? '{}'), 'checkpoint');
     }
 
     /** Hydrate a checkpoint created by {@link createCheckpoint}. */
@@ -1630,7 +1811,7 @@ export class OcctKernel {
         const checkpointJson = typeof params.checkpoint === 'string'
             ? params.checkpoint
             : JSON.stringify(params.checkpoint);
-        return makeHandle(wrap(() => this._native.hydrateCheckpoint?.(checkpointJson) ?? 0));
+        return this.makeHandle(wrap(() => this._native.hydrateCheckpoint?.(checkpointJson) ?? 0));
     }
 
     // -----------------------------------------------------------------------
@@ -1643,7 +1824,7 @@ export class OcctKernel {
      * After calling this method the handle must not be used again.
      */
     disposeShape(params: DisposeParams): void {
-        wrap(() => this._native.disposeShape(params.shape.id));
+        wrap(() => this._native.disposeShape(this.shapeId(params.shape)));
     }
 
     /** Increment the native reference count for a resident immutable revision. */
@@ -1651,7 +1832,7 @@ export class OcctKernel {
         if (typeof this._native.retainRevision !== 'function') {
             throw new KernelError('UNKNOWN', 'Native module does not support retainRevision');
         }
-        wrap(() => this._native.retainRevision?.(params.shape.id));
+        wrap(() => this._native.retainRevision?.(this.shapeId(params.shape)));
     }
 
     /** Decrement the native reference count and return true when the revision was evicted. */
@@ -1659,6 +1840,6 @@ export class OcctKernel {
         if (typeof this._native.releaseRevision !== 'function') {
             throw new KernelError('UNKNOWN', 'Native module does not support releaseRevision');
         }
-        return wrap(() => this._native.releaseRevision?.(params.shape.id) ?? false);
+        return wrap(() => this._native.releaseRevision?.(this.shapeId(params.shape)) ?? false);
     }
 }

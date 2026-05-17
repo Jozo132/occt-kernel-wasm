@@ -9,6 +9,7 @@ import { OcctKernel } from '../../src/kernel';
 import { KernelError } from '../../src/errors';
 import { MockNativeKernel } from '../../src/mock-adapter';
 import type { WasmModule } from '../../src/kernel';
+import type { ShapeHandle } from '../../src/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -24,6 +25,14 @@ function makeKernel(): OcctKernel {
     return new OcctKernel(makeMockModule());
 }
 
+function invalidHandle(handle: ShapeHandle, id = 9999): ShapeHandle {
+    return { ...handle, id };
+}
+
+function foreignHandle(handle: ShapeHandle): ShapeHandle {
+    return { ...handle, sessionId: `${handle.sessionId}_other` };
+}
+
 // ---------------------------------------------------------------------------
 // createBox
 // ---------------------------------------------------------------------------
@@ -34,6 +43,7 @@ describe('createBox', () => {
         const handle = k.createBox({ dx: 10, dy: 5, dz: 2 });
         expect(handle.id).toBeGreaterThan(0);
         expect(Number.isInteger(handle.id)).toBe(true);
+        expect(handle.sessionId).toMatch(/^session_/);
     });
 
     it('each call returns a unique id', () => {
@@ -331,7 +341,8 @@ describe('transformShape', () => {
 
     it('throws KernelError for an invalid shape handle', () => {
         const k = makeKernel();
-        expect(() => k.transformShape({ shape: { id: 9999 }, transform: { translation: [1, 0, 0] } })).toThrow(KernelError);
+        const box = k.createBox({ dx: 2, dy: 2, dz: 2 });
+        expect(() => k.transformShape({ shape: invalidHandle(box), transform: { translation: [1, 0, 0] } })).toThrow(KernelError);
     });
 });
 
@@ -353,13 +364,15 @@ describe('booleanUnion', () => {
     it('throws KernelError for an invalid base handle', () => {
         const k = makeKernel();
         const b = k.createBox({ dx: 5, dy: 5, dz: 5 });
-        expect(() => k.booleanUnion({ base: { id: 9999 }, tool: b })).toThrow(KernelError);
+        const a = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        expect(() => k.booleanUnion({ base: invalidHandle(a), tool: b })).toThrow(KernelError);
     });
 
     it('throws KernelError for an invalid tool handle', () => {
         const k = makeKernel();
         const a = k.createBox({ dx: 10, dy: 10, dz: 10 });
-        expect(() => k.booleanUnion({ base: a, tool: { id: 9999 } })).toThrow(KernelError);
+        const b = k.createBox({ dx: 5, dy: 5, dz: 5 });
+        expect(() => k.booleanUnion({ base: a, tool: invalidHandle(b) })).toThrow(KernelError);
     });
 });
 
@@ -405,7 +418,8 @@ describe('filletEdges', () => {
 
     it('throws KernelError for invalid shape handle', () => {
         const k = makeKernel();
-        expect(() => k.filletEdges({ shape: { id: 9999 }, radius: 1 })).toThrow(KernelError);
+        const box = k.createBox({ dx: 2, dy: 2, dz: 2 });
+        expect(() => k.filletEdges({ shape: invalidHandle(box), radius: 1 })).toThrow(KernelError);
     });
 });
 
@@ -837,17 +851,46 @@ describe('getTopology', () => {
         expect(topo.vertices).toHaveLength(topo.vertexCount);
         expect(topo.faces?.[0]?.stableHash).toMatch(/^F:/);
         expect(topo.edges?.[0]?.topoFaceIds?.length).toBeGreaterThan(0);
+        expect(topo.shapeType).toBe('solid');
+        expect(topo.solidCount).toBe(1);
+        expect(topo.shellCount).toBe(1);
+        expect(topo.wireCount).toBeGreaterThan(0);
+        expect(topo.solids?.[0]?.shellIds).toEqual([1]);
+        expect(topo.shells?.[0]?.faceIds?.length).toBe(topo.faceCount);
         expect(topo.deletedEntities).toEqual([]);
     });
 
     it('throws KernelError for invalid handle', () => {
         const k = makeKernel();
-        expect(() => k.getTopology({ id: 9999 })).toThrow(KernelError);
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        expect(() => k.getTopology(invalidHandle(box))).toThrow(KernelError);
+    });
+});
+
+describe('session ownership', () => {
+    it('throws SESSION_MISMATCH when a handle crosses kernel instances', () => {
+        const firstKernel = makeKernel();
+        const secondKernel = makeKernel();
+        const box = firstKernel.createBox({ dx: 1, dy: 1, dz: 1 });
+
+        expect(() => secondKernel.getTopology(box)).toThrow(KernelError);
+        try {
+            secondKernel.getTopology(box);
+            fail('should have thrown');
+        } catch (error) {
+            expect((error as KernelError).code).toBe('SESSION_MISMATCH');
+        }
+    });
+
+    it('treats altered handles with a different session as a session mismatch', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 1, dy: 1, dz: 1 });
+        expect(() => k.getTopology(foreignHandle(box))).toThrow(KernelError);
     });
 });
 
 describe('getCapabilities', () => {
-    it('reports implemented feature-edge and topology contracts without claiming history support', () => {
+    it('reports implemented feature-edge, history, and stable naming contracts', () => {
         const k = makeKernel();
         const capabilities = k.getCapabilities();
 
@@ -855,13 +898,20 @@ describe('getCapabilities', () => {
         expect(capabilities.rawEdgeSegmentsV1).toBe(true);
         expect(capabilities.triangleNormalsV1).toBe(true);
         expect(capabilities.topologySubshapesV1).toBe(true);
+        expect(capabilities.topologyHierarchyV1).toBe(true);
         expect(capabilities.revisionInfoV1).toBe(true);
         expect(capabilities.entityResolutionV1).toBe(true);
         expect(capabilities.entityRemapV1).toBe(true);
         expect(capabilities.revisionRetentionV1).toBe(true);
         expect(capabilities.historyV1).toBe(true);
-        expect(capabilities.stableNamingV1).toBe(false);
+        expect(capabilities.stableNamingV1).toBe(true);
         expect(capabilities.checkpointV1).toBe(true);
+        expect(capabilities.versionInfoV1).toBe(true);
+        expect(capabilities.analysisV1).toBe(true);
+        expect(capabilities.analysis?.shapeIntersection).toBe(true);
+        expect(capabilities.analysis?.closestPoint).toBe(true);
+        expect(capabilities.analysis?.shapeDistance).toBe(true);
+        expect(capabilities.sessionHandlesV1).toBe(true);
         expect(capabilities.operations?.nativeExactBlendOpsV1).toBe(true);
         expect(capabilities.extrudeProfile?.draft).toBe(true);
         expect(capabilities.extrudeProfile?.endConditions).toContain('upToSurface');
@@ -874,6 +924,9 @@ describe('getCapabilities', () => {
         expect(capabilities.fillet?.partialEdges).toBe(false);
         expect(capabilities.chamfer?.distanceAngle).toBe(true);
         expect(capabilities.subshapeEvaluation?.evaluateEdge).toBe(true);
+        expect(capabilities.analysis?.volume).toBe(true);
+        expect(capabilities.analysis?.pointContainment).toBe(true);
+        expect(capabilities.runtime?.worker).toBe(true);
     });
 
     it('returns a versioned operation schema', () => {
@@ -888,7 +941,73 @@ describe('getCapabilities', () => {
         expect(schema.operations.sweepProfile).toBeDefined();
         expect(schema.operations.loft).toBeDefined();
         expect(schema.operations.filletEdges).toBeDefined();
+        expect(schema.operations.getVersionInfo).toBeDefined();
+        expect(schema.operations.analyzeShape).toBeDefined();
+        expect(schema.operations.classifyPointContainment).toBeDefined();
+        expect(schema.operations.intersectShapes).toBeDefined();
+        expect(schema.operations.findClosestPointOnShape).toBeDefined();
+        expect(schema.operations.measureShapeDistance).toBeDefined();
         expect(schema.operations.evaluateFace).toBeDefined();
+    });
+});
+
+describe('getVersionInfo', () => {
+    it('returns wrapper and native version metadata for the current session', () => {
+        const k = makeKernel();
+        const info = k.getVersionInfo();
+
+        expect(info.libraryVersion).toBe('1.0.0');
+        expect(info.apiVersion).toBe(1);
+        expect(info.kernelVersion).toBe('8.0.0');
+        expect(info.sessionId).toMatch(/^session_/);
+        expect(info.supportedRuntimes).toEqual(['browser', 'worker', 'node']);
+    });
+});
+
+describe('analysis queries', () => {
+    it('returns exact-ish mass properties and counts for boxes', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 2, dy: 3, dz: 4 });
+        const analysis = k.analyzeShape({ shape: box });
+
+        expect(analysis.shapeType).toBe('solid');
+        expect(analysis.solidCount).toBe(1);
+        expect(analysis.faceCount).toBe(6);
+        expect(analysis.volume).toBeCloseTo(24);
+        expect(analysis.surfaceArea).toBeCloseTo(52);
+        expect(analysis.linearLength).toBeCloseTo(36);
+        expect(analysis.centerOfMass).toEqual([1, 1.5, 2]);
+        expect(analysis.centerOfMassBasis).toBe('volume');
+    });
+
+    it('classifies points against resident solids', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 2, dy: 3, dz: 4 });
+
+        expect(k.classifyPointContainment({ shape: box, point: [1, 1, 1] }).state).toBe('in');
+        expect(k.classifyPointContainment({ shape: box, point: [2, 1, 1] }).state).toBe('on');
+        expect(k.classifyPointContainment({ shape: box, point: [3, 1, 1] }).state).toBe('out');
+    });
+
+    it('returns section, closest-point, and shape-distance query results', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 2, dy: 2, dz: 2 });
+        const farBox = k.transformShape({ shape: box, transform: { translation: [5, 0, 0] } });
+        const overlappingBox = k.transformShape({ shape: box, transform: { translation: [1, 1, 0] } });
+
+        const closest = k.findClosestPointOnShape({ shape: box, point: [5, 1, 1] });
+        expect(closest.closestPoint).toEqual([2, 1, 1]);
+        expect(closest.distance).toBeCloseTo(3);
+
+        const distance = k.measureShapeDistance({ shapeA: box, shapeB: farBox });
+        expect(distance.distance).toBeCloseTo(3);
+        expect(distance.clearance).toBeCloseTo(3);
+        expect(distance.solutions).toHaveLength(1);
+
+        const section = k.intersectShapes({ shapeA: box, shapeB: overlappingBox });
+        expect(section.hasIntersection).toBe(true);
+        expect(section.edgeCount).toBeGreaterThan(0);
+        expect(section.sectionShape).toBeDefined();
     });
 });
 
@@ -943,6 +1062,18 @@ describe('revision identity APIs', () => {
         });
     });
 
+    it('retains stable hashes across transformed topology revisions', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const moved = k.transformShape({ shape: box, transform: { translation: [1, 2, 3] } });
+
+        const sourceTopology = k.getTopology(box);
+        const movedTopology = k.getTopology(moved);
+
+        expect(movedTopology.faces?.[0]?.stableHash).toBe(sourceTopology.faces?.[0]?.stableHash);
+        expect(movedTopology.edges?.[0]?.stableHash).toBe(sourceTopology.edges?.[0]?.stableHash);
+    });
+
     it('round-trips checkpoint metadata and hydrates a new handle', () => {
         const k = makeKernel();
         const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
@@ -954,6 +1085,18 @@ describe('revision identity APIs', () => {
         expect(checkpoint.brep.length).toBeGreaterThan(0);
         expect(revision.createdFromCheckpoint).toBe(true);
         expect(revision.revisionId).toBe(checkpoint.revision.revisionId);
+    });
+
+    it('throws INVALID_CHECKPOINT for malformed checkpoint payloads', () => {
+        const k = makeKernel();
+
+        expect(() => k.hydrateCheckpoint({ checkpoint: '{not-json' })).toThrow(KernelError);
+        try {
+            k.hydrateCheckpoint({ checkpoint: '{not-json' });
+            fail('should have thrown');
+        } catch (error) {
+            expect((error as KernelError).code).toBe('INVALID_CHECKPOINT');
+        }
     });
 
     it('retains and releases resident revisions by reference count', () => {
@@ -1039,7 +1182,8 @@ describe('tessellate', () => {
 
     it('throws KernelError for invalid handle', () => {
         const k = makeKernel();
-        expect(() => k.tessellate({ shape: { id: 9999 } })).toThrow(KernelError);
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        expect(() => k.tessellate({ shape: invalidHandle(box) })).toThrow(KernelError);
     });
 });
 
@@ -1156,7 +1300,8 @@ describe('exportStep', () => {
 
     it('throws KernelError for invalid handle', () => {
         const k = makeKernel();
-        expect(() => k.exportStep({ shape: { id: 9999 } })).toThrow(KernelError);
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        expect(() => k.exportStep({ shape: invalidHandle(box) })).toThrow(KernelError);
     });
 });
 

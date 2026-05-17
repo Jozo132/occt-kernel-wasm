@@ -98,6 +98,264 @@ export class MockNativeKernel {
     private _refCounts = new Map<number, number>();
     private _nextId = 1;
 
+    private _defaultStableHashes(shapeKind: string, kind: 'face' | 'edge' | 'vertex', count: number): string[] {
+        const prefix = kind === 'face' ? 'F' : kind === 'edge' ? 'E' : 'V';
+        return Array.from({ length: count }, (_unused, index) => `${prefix}:mock_${shapeKind}_${index + 1}`);
+    }
+
+    private _stableHashes(shape: MockShape, kind: 'face' | 'edge' | 'vertex', count: number): string[] {
+        const key = `${kind}StableHashes`;
+        const candidate = shape.params[key];
+        if (Array.isArray(candidate) && candidate.length === count && candidate.every((entry) => typeof entry === 'string')) {
+            return [...candidate as string[]];
+        }
+        return this._defaultStableHashes(shape.kind, kind, count);
+    }
+
+    private _inheritStableHashes(shape: MockShape, resultKind: string, kind: 'face' | 'edge' | 'vertex'): string[] {
+        const sourceAnalysis = this._analysis(shape);
+        const resultAnalysis = this._analysis({ kind: resultKind, params: {} });
+        const sourceCount = kind === 'face' ? sourceAnalysis.faceCount : kind === 'edge' ? sourceAnalysis.edgeCount : sourceAnalysis.vertexCount;
+        const targetCount = kind === 'face' ? resultAnalysis.faceCount : kind === 'edge' ? resultAnalysis.edgeCount : resultAnalysis.vertexCount;
+        const inherited = this._stableHashes(shape, kind, sourceCount);
+        const prefix = kind === 'face' ? 'F' : kind === 'edge' ? 'E' : 'V';
+
+        return Array.from({ length: targetCount }, (_unused, index) => inherited[index] ?? `${prefix}:mock_${resultKind}_derived_${index + 1}`);
+    }
+
+    private _boundsOverlap(
+        a: { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number },
+        b: { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number },
+    ): boolean {
+        return a.xMin <= b.xMax && a.xMax >= b.xMin
+            && a.yMin <= b.yMax && a.yMax >= b.yMin
+            && a.zMin <= b.zMax && a.zMax >= b.zMin;
+    }
+
+    private _intersectBounds(
+        a: { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number },
+        b: { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number },
+    ): { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number } {
+        return {
+            xMin: Math.max(a.xMin, b.xMin),
+            yMin: Math.max(a.yMin, b.yMin),
+            zMin: Math.max(a.zMin, b.zMin),
+            xMax: Math.min(a.xMax, b.xMax),
+            yMax: Math.min(a.yMax, b.yMax),
+            zMax: Math.min(a.zMax, b.zMax),
+        };
+    }
+
+    private _closestPointOnBounds(
+        point: readonly [number, number, number],
+        bounds: { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number },
+    ): [number, number, number] {
+        return [
+            Math.min(Math.max(point[0], bounds.xMin), bounds.xMax),
+            Math.min(Math.max(point[1], bounds.yMin), bounds.yMax),
+            Math.min(Math.max(point[2], bounds.zMin), bounds.zMax),
+        ];
+    }
+
+    private _distanceBetweenBounds(
+        a: { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number },
+        b: { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number },
+    ): { distance: number; pointOnA: [number, number, number]; pointOnB: [number, number, number] } {
+        const pointOnA: [number, number, number] = [0, 0, 0];
+        const pointOnB: [number, number, number] = [0, 0, 0];
+
+        const assignAxis = (
+            minA: number,
+            maxA: number,
+            minB: number,
+            maxB: number,
+            index: 0 | 1 | 2,
+        ): number => {
+            if (maxA < minB) {
+                pointOnA[index] = maxA;
+                pointOnB[index] = minB;
+                return minB - maxA;
+            }
+            if (maxB < minA) {
+                pointOnA[index] = minA;
+                pointOnB[index] = maxB;
+                return minA - maxB;
+            }
+            const overlap = Math.max(minA, minB);
+            pointOnA[index] = overlap;
+            pointOnB[index] = overlap;
+            return 0;
+        };
+
+        const dx = assignAxis(a.xMin, a.xMax, b.xMin, b.xMax, 0);
+        const dy = assignAxis(a.yMin, a.yMax, b.yMin, b.yMax, 1);
+        const dz = assignAxis(a.zMin, a.zMax, b.zMin, b.zMax, 2);
+
+        return {
+            distance: Math.sqrt(dx * dx + dy * dy + dz * dz),
+            pointOnA,
+            pointOnB,
+        };
+    }
+
+    private _boundingBox(shape: MockShape): { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number } {
+        if (shape.kind === 'box') {
+            const dx = Number(shape.params.dx) || 1;
+            const dy = Number(shape.params.dy) || 1;
+            const dz = Number(shape.params.dz) || 1;
+            return { xMin: 0, yMin: 0, zMin: 0, xMax: dx, yMax: dy, zMax: dz };
+        }
+        if (shape.kind === 'cylinder') {
+            const radius = Number(shape.params.radius) || 1;
+            const height = Number(shape.params.height) || 1;
+            return { xMin: -radius, yMin: -radius, zMin: 0, xMax: radius, yMax: radius, zMax: height };
+        }
+        if (shape.kind === 'sphere') {
+            const radius = Number(shape.params.radius) || 1;
+            return { xMin: -radius, yMin: -radius, zMin: -radius, xMax: radius, yMax: radius, zMax: radius };
+        }
+        if (shape.kind === 'transform' && isPositiveInteger(shape.params.id)) {
+            const sourceBounds = this._boundingBox(this._require(Number(shape.params.id)));
+            const translation = Array.isArray((shape.params.transform as MockShapeTransform | undefined)?.translation)
+                ? (shape.params.transform as MockShapeTransform).translation ?? [0, 0, 0]
+                : [0, 0, 0];
+            return {
+                xMin: sourceBounds.xMin + translation[0],
+                yMin: sourceBounds.yMin + translation[1],
+                zMin: sourceBounds.zMin + translation[2],
+                xMax: sourceBounds.xMax + translation[0],
+                yMax: sourceBounds.yMax + translation[1],
+                zMax: sourceBounds.zMax + translation[2],
+            };
+        }
+        if (shape.kind === 'intersection' && isPositiveInteger(shape.params.id1) && isPositiveInteger(shape.params.id2)) {
+            const boundsA = this._boundingBox(this._require(Number(shape.params.id1)));
+            const boundsB = this._boundingBox(this._require(Number(shape.params.id2)));
+            return this._intersectBounds(boundsA, boundsB);
+        }
+        return { xMin: 0, yMin: 0, zMin: 0, xMax: 1, yMax: 1, zMax: 1 };
+    }
+
+    private _analysis(shape: MockShape): {
+        shapeType: string;
+        solidCount: number;
+        shellCount: number;
+        wireCount: number;
+        faceCount: number;
+        edgeCount: number;
+        vertexCount: number;
+        boundingBox: { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number };
+        isValid: boolean;
+        volume: number;
+        surfaceArea: number;
+        linearLength: number;
+        centerOfMass: [number, number, number] | null;
+        centerOfMassBasis: 'volume' | 'surface' | 'linear' | 'none';
+    } {
+        if (shape.kind === 'box') {
+            const dx = Number(shape.params.dx) || 1;
+            const dy = Number(shape.params.dy) || 1;
+            const dz = Number(shape.params.dz) || 1;
+            return {
+                shapeType: 'solid',
+                solidCount: 1,
+                shellCount: 1,
+                wireCount: 6,
+                faceCount: 6,
+                edgeCount: 12,
+                vertexCount: 8,
+                boundingBox: this._boundingBox(shape),
+                isValid: shape.params.invalid !== true,
+                volume: dx * dy * dz,
+                surfaceArea: 2 * (dx * dy + dy * dz + dx * dz),
+                linearLength: 4 * (dx + dy + dz),
+                centerOfMass: [dx / 2, dy / 2, dz / 2],
+                centerOfMassBasis: 'volume',
+            };
+        }
+        if (shape.kind === 'cylinder') {
+            const radius = Number(shape.params.radius) || 1;
+            const height = Number(shape.params.height) || 1;
+            return {
+                shapeType: 'solid',
+                solidCount: 1,
+                shellCount: 1,
+                wireCount: 3,
+                faceCount: 3,
+                edgeCount: 3,
+                vertexCount: 2,
+                boundingBox: this._boundingBox(shape),
+                isValid: shape.params.invalid !== true,
+                volume: Math.PI * radius * radius * height,
+                surfaceArea: 2 * Math.PI * radius * (radius + height),
+                linearLength: 4 * Math.PI * radius,
+                centerOfMass: [0, 0, height / 2],
+                centerOfMassBasis: 'volume',
+            };
+        }
+        if (shape.kind === 'sphere') {
+            const radius = Number(shape.params.radius) || 1;
+            return {
+                shapeType: 'solid',
+                solidCount: 1,
+                shellCount: 1,
+                wireCount: 1,
+                faceCount: 1,
+                edgeCount: 0,
+                vertexCount: 0,
+                boundingBox: this._boundingBox(shape),
+                isValid: shape.params.invalid !== true,
+                volume: (4 / 3) * Math.PI * radius * radius * radius,
+                surfaceArea: 4 * Math.PI * radius * radius,
+                linearLength: 0,
+                centerOfMass: [0, 0, 0],
+                centerOfMassBasis: 'volume',
+            };
+        }
+        if (shape.kind === 'transform' && isPositiveInteger(shape.params.id)) {
+            const source = this._require(Number(shape.params.id));
+            const analysis = this._analysis(source);
+            return {
+                ...analysis,
+                boundingBox: this._boundingBox(shape),
+            };
+        }
+        if (shape.kind === 'intersection') {
+            return {
+                shapeType: 'compound',
+                solidCount: 0,
+                shellCount: 0,
+                wireCount: 1,
+                faceCount: 0,
+                edgeCount: Number(shape.params.edgeCount) || 4,
+                vertexCount: Number(shape.params.vertexCount) || 4,
+                boundingBox: this._boundingBox(shape),
+                isValid: true,
+                volume: 0,
+                surfaceArea: 0,
+                linearLength: 1,
+                centerOfMass: null,
+                centerOfMassBasis: 'none',
+            };
+        }
+        return {
+            shapeType: 'solid',
+            solidCount: 1,
+            shellCount: 1,
+            wireCount: 6,
+            faceCount: 6,
+            edgeCount: 12,
+            vertexCount: 8,
+            boundingBox: this._boundingBox(shape),
+            isValid: shape.params.invalid !== true,
+            volume: 1,
+            surfaceArea: 6,
+            linearLength: 12,
+            centerOfMass: [0.5, 0.5, 0.5],
+            centerOfMassBasis: 'volume',
+        };
+    }
+
     private _store(kind: string, params: Record<string, unknown>): number {
         const id = this._nextId++;
         this._shapes.set(id, { kind, params });
@@ -121,6 +379,15 @@ export class MockNativeKernel {
 
         const unresolved = ['union', 'subtract', 'intersect', 'fillet', 'chamfer', 'extrudeFeature', 'extrudeCutFeature', 'revolveFeature', 'revolveCutFeature', 'sweepFeature', 'sweepCutFeature', 'loftFeature', 'loftCutFeature'].includes(shape.kind);
         const retained = shape.kind === 'transform';
+        const entityStatus = typeof shape.params.entityStatus === 'string'
+            ? shape.params.entityStatus
+            : unresolved ? 'unresolved' : retained ? 'retained' : 'generated';
+        const identityStatus = typeof shape.params.identityStatus === 'string'
+            ? shape.params.identityStatus
+            : unresolved ? 'unresolved' : retained ? 'retained' : 'generated';
+        const historyWarnings = Array.isArray(shape.params.historyWarnings)
+            ? [...shape.params.historyWarnings as string[]]
+            : unresolved ? ['Mock lineage is unresolved for this operation'] : [];
         return {
             revisionId: `rev_mock_${id}`,
             operationId: `op_mock_${id}`,
@@ -131,9 +398,9 @@ export class MockNativeKernel {
             topologyHash: `T:mock_${shape.kind}_${id}`,
             historySchemaVersion: 1,
             createdFromCheckpoint: false,
-            entityStatus: unresolved ? 'unresolved' : retained ? 'retained' : 'generated',
-            identityStatus: unresolved ? 'unresolved' : retained ? 'retained' : 'generated',
-            historyWarnings: unresolved ? ['Mock lineage is unresolved for this operation'] : [],
+            entityStatus,
+            identityStatus,
+            historyWarnings,
             deletedEntities: [],
         };
     }
@@ -921,80 +1188,211 @@ export class MockNativeKernel {
     // -- Booleans --
 
     booleanUnion(id1: number, id2: number): number {
-        this._require(id1);
+        const source = this._require(id1);
         this._require(id2);
-        return this._store('union', { id1, id2 });
+        return this._store('union', {
+            id1,
+            id2,
+            faceStableHashes: this._inheritStableHashes(source, 'union', 'face'),
+            edgeStableHashes: this._inheritStableHashes(source, 'union', 'edge'),
+            vertexStableHashes: this._inheritStableHashes(source, 'union', 'vertex'),
+            identityStatus: 'resolved',
+            historyWarnings: [],
+        });
     }
 
     booleanSubtract(id1: number, id2: number): number {
-        this._require(id1);
+        const source = this._require(id1);
         this._require(id2);
-        return this._store('subtract', { id1, id2 });
+        return this._store('subtract', {
+            id1,
+            id2,
+            faceStableHashes: this._inheritStableHashes(source, 'subtract', 'face'),
+            edgeStableHashes: this._inheritStableHashes(source, 'subtract', 'edge'),
+            vertexStableHashes: this._inheritStableHashes(source, 'subtract', 'vertex'),
+            identityStatus: 'resolved',
+            historyWarnings: [],
+        });
     }
 
     booleanIntersect(id1: number, id2: number): number {
-        this._require(id1);
+        const source = this._require(id1);
         this._require(id2);
-        return this._store('intersect', { id1, id2 });
+        return this._store('intersect', {
+            id1,
+            id2,
+            faceStableHashes: this._inheritStableHashes(source, 'intersect', 'face'),
+            edgeStableHashes: this._inheritStableHashes(source, 'intersect', 'edge'),
+            vertexStableHashes: this._inheritStableHashes(source, 'intersect', 'vertex'),
+            identityStatus: 'resolved',
+            historyWarnings: [],
+        });
     }
 
     // -- Modifiers --
 
     filletEdges(id: number, radius: number): number {
-        this._require(id);
+        const source = this._require(id);
         if (radius <= 0) {
             throw new KernelError('INVALID_PARAMS', 'Fillet radius must be > 0');
         }
-        return this._store('fillet', { id, radius });
+        return this._store('fillet', {
+            id,
+            radius,
+            faceStableHashes: this._inheritStableHashes(source, 'fillet', 'face'),
+            edgeStableHashes: this._inheritStableHashes(source, 'fillet', 'edge'),
+            vertexStableHashes: this._inheritStableHashes(source, 'fillet', 'vertex'),
+            identityStatus: 'resolved',
+            historyWarnings: [],
+        });
     }
 
     chamferEdges(id: number, distance: number): number {
-        this._require(id);
+        const source = this._require(id);
         if (distance <= 0) {
             throw new KernelError('INVALID_PARAMS', 'Chamfer distance must be > 0');
         }
-        return this._store('chamfer', { id, distance });
+        return this._store('chamfer', {
+            id,
+            distance,
+            faceStableHashes: this._inheritStableHashes(source, 'chamfer', 'face'),
+            edgeStableHashes: this._inheritStableHashes(source, 'chamfer', 'edge'),
+            vertexStableHashes: this._inheritStableHashes(source, 'chamfer', 'vertex'),
+            identityStatus: 'resolved',
+            historyWarnings: [],
+        });
     }
 
     filletEdgesWithSpec(id: number, specJson: string): string {
-        this._require(id);
+        const source = this._require(id);
         const spec = JSON.parse(specJson) as Record<string, unknown>;
         this._validateBlendSpec(spec, 'fillet');
         const edgeCount = Array.isArray(spec.edges) ? Math.max(spec.edges.length, 1) : 12;
-        const shapeId = this._store('fillet', { id, spec });
+        const shapeId = this._store('fillet', {
+            id,
+            spec,
+            faceStableHashes: this._inheritStableHashes(source, 'fillet', 'face'),
+            edgeStableHashes: this._inheritStableHashes(source, 'fillet', 'edge'),
+            vertexStableHashes: this._inheritStableHashes(source, 'fillet', 'vertex'),
+            identityStatus: 'resolved',
+            historyWarnings: [],
+        });
         return this._blendResult(shapeId, 'filletFace', edgeCount);
     }
 
     chamferEdgesWithSpec(id: number, specJson: string): string {
-        this._require(id);
+        const source = this._require(id);
         const spec = JSON.parse(specJson) as Record<string, unknown>;
         this._validateBlendSpec(spec, 'chamfer');
         const edgeCount = Array.isArray(spec.edges) ? Math.max(spec.edges.length, 1) : 12;
-        const shapeId = this._store('chamfer', { id, spec });
+        const shapeId = this._store('chamfer', {
+            id,
+            spec,
+            faceStableHashes: this._inheritStableHashes(source, 'chamfer', 'face'),
+            edgeStableHashes: this._inheritStableHashes(source, 'chamfer', 'edge'),
+            vertexStableHashes: this._inheritStableHashes(source, 'chamfer', 'vertex'),
+            identityStatus: 'resolved',
+            historyWarnings: [],
+        });
         return this._blendResult(shapeId, 'chamferFace', edgeCount);
     }
 
     transformShape(id: number, transformJson: string): number {
-        this._require(id);
+        const source = this._require(id);
         const transform = this._parseShapeTransform(transformJson);
-        return this._store('transform', { id, transform });
+        const analysis = this._analysis(source);
+        return this._store('transform', {
+            id,
+            transform,
+            faceStableHashes: this._stableHashes(source, 'face', analysis.faceCount),
+            edgeStableHashes: this._stableHashes(source, 'edge', analysis.edgeCount),
+            vertexStableHashes: this._stableHashes(source, 'vertex', analysis.vertexCount),
+            identityStatus: 'retained',
+            entityStatus: 'retained',
+            historyWarnings: [],
+        });
+    }
+
+    intersectShapes(id1: number, id2: number): string {
+        const shapeA = this._require(id1);
+        const shapeB = this._require(id2);
+        const boundsA = this._boundingBox(shapeA);
+        const boundsB = this._boundingBox(shapeB);
+
+        if (!this._boundsOverlap(boundsA, boundsB)) {
+            return JSON.stringify({ hasIntersection: false, edgeCount: 0, vertexCount: 0 });
+        }
+
+        const sectionShapeId = this._store('intersection', {
+            id1,
+            id2,
+            edgeCount: 4,
+            vertexCount: 4,
+            edgeStableHashes: this._defaultStableHashes('intersection', 'edge', 4),
+            vertexStableHashes: this._defaultStableHashes('intersection', 'vertex', 4),
+            identityStatus: 'generated',
+            historyWarnings: [],
+        });
+
+        return JSON.stringify({
+            hasIntersection: true,
+            edgeCount: 4,
+            vertexCount: 4,
+            sectionShapeId,
+        });
     }
 
     // -- Queries --
 
+    getKernelVersionInfo(): string {
+        return JSON.stringify({
+            kernelVersion: '8.0.0',
+            kernelVersionMajor: 8,
+            kernelVersionMinor: 0,
+            kernelVersionMaintenance: 0,
+            checkpointSchemaVersion: 1,
+            operationSchemaVersion: 1,
+        });
+    }
+
     getTopology(id: number): string {
         const shape = this._require(id);
         const revision = this._revisionInfo(id);
+        const analysis = this._analysis(shape);
+        const faceStableHashes = this._stableHashes(shape, 'face', analysis.faceCount);
+        const edgeStableHashes = this._stableHashes(shape, 'edge', analysis.edgeCount);
+        const vertexStableHashes = this._stableHashes(shape, 'vertex', analysis.vertexCount);
         return JSON.stringify({
             ...revision,
-            faceCount: 6,
-            edgeCount: 12,
-            vertexCount: 8,
-            boundingBox: { xMin: 0, yMin: 0, zMin: 0, xMax: 1, yMax: 1, zMax: 1 },
-            isValid: shape.params.invalid !== true,
-            faces: Array.from({ length: 6 }, (_, index) => ({
+            shapeType: analysis.shapeType,
+            solidCount: analysis.solidCount,
+            shellCount: analysis.shellCount,
+            wireCount: analysis.wireCount,
+            faceCount: analysis.faceCount,
+            edgeCount: analysis.edgeCount,
+            vertexCount: analysis.vertexCount,
+            boundingBox: analysis.boundingBox,
+            isValid: analysis.isValid,
+            solids: Array.from({ length: analysis.solidCount }, (_, index) => ({
                 id: index + 1,
-                stableHash: `F:mock_${shape.kind}_${index + 1}`,
+                shellIds: [1],
+                status: revision.entityStatus,
+            })),
+            shells: Array.from({ length: analysis.shellCount }, (_, index) => ({
+                id: index + 1,
+                solidIds: [1],
+                faceIds: Array.from({ length: analysis.faceCount }, (_unused, faceIndex) => faceIndex + 1),
+                status: revision.entityStatus,
+            })),
+            wires: Array.from({ length: analysis.wireCount }, (_, index) => ({
+                id: index + 1,
+                edgeIds: Array.from({ length: Math.min(4, analysis.edgeCount) }, (_unused, edgeIndex) => edgeIndex + 1),
+                topoFaceIds: [Math.min(index + 1, analysis.faceCount)],
+                status: revision.entityStatus,
+            })),
+            faces: Array.from({ length: analysis.faceCount }, (_, index) => ({
+                id: index + 1,
+                stableHash: faceStableHashes[index],
                 role: 'unknown',
                 sourceFeatureId: null,
                 generatedFrom: [],
@@ -1003,21 +1401,132 @@ export class MockNativeKernel {
                 status: revision.entityStatus,
                 shared: {},
             })),
-            edges: Array.from({ length: 12 }, (_, index) => ({
+            edges: Array.from({ length: analysis.edgeCount }, (_, index) => ({
                 id: index + 1,
-                stableHash: `E:mock_${shape.kind}_${index + 1}`,
-                topoFaceIds: [1, 2],
+                stableHash: edgeStableHashes[index],
+                topoFaceIds: Array.from({ length: Math.min(2, analysis.faceCount) }, (_unused, faceIndex) => faceIndex + 1),
                 generatedFrom: [],
                 modifiedFrom: [],
                 retainedFrom: [],
                 status: revision.entityStatus,
             })),
-            vertices: Array.from({ length: 8 }, (_, index) => ({
+            vertices: Array.from({ length: analysis.vertexCount }, (_, index) => ({
                 id: index + 1,
-                stableHash: `V:mock_${shape.kind}_${index + 1}`,
+                stableHash: vertexStableHashes[index],
                 status: revision.entityStatus,
             })),
             deletedEntities: revision.deletedEntities,
+        });
+    }
+
+    analyzeShape(id: number): string {
+        const shape = this._require(id);
+        return JSON.stringify(this._analysis(shape));
+    }
+
+    classifyPointContainment(id: number, pointJson: string, tolerance: number): string {
+        const shape = this._require(id);
+        const point = JSON.parse(pointJson) as [number, number, number];
+        const bounds = this._boundingBox(shape);
+        let state: 'in' | 'out' | 'on' | 'unknown' = 'unknown';
+
+        if (shape.kind === 'sphere') {
+            const radius = Number(shape.params.radius) || 1;
+            const distance = Math.sqrt(point[0] * point[0] + point[1] * point[1] + point[2] * point[2]);
+            if (Math.abs(distance - radius) <= tolerance) {
+                state = 'on';
+            } else if (distance < radius) {
+                state = 'in';
+            } else {
+                state = 'out';
+            }
+        } else {
+            const insideX = point[0] > bounds.xMin + tolerance && point[0] < bounds.xMax - tolerance;
+            const insideY = point[1] > bounds.yMin + tolerance && point[1] < bounds.yMax - tolerance;
+            const insideZ = point[2] > bounds.zMin + tolerance && point[2] < bounds.zMax - tolerance;
+            const onX = Math.abs(point[0] - bounds.xMin) <= tolerance || Math.abs(point[0] - bounds.xMax) <= tolerance;
+            const onY = Math.abs(point[1] - bounds.yMin) <= tolerance || Math.abs(point[1] - bounds.yMax) <= tolerance;
+            const onZ = Math.abs(point[2] - bounds.zMin) <= tolerance || Math.abs(point[2] - bounds.zMax) <= tolerance;
+            const withinBounds = point[0] >= bounds.xMin - tolerance
+                && point[0] <= bounds.xMax + tolerance
+                && point[1] >= bounds.yMin - tolerance
+                && point[1] <= bounds.yMax + tolerance
+                && point[2] >= bounds.zMin - tolerance
+                && point[2] <= bounds.zMax + tolerance;
+
+            if (insideX && insideY && insideZ) {
+                state = 'in';
+            } else if (withinBounds && (onX || onY || onZ)) {
+                state = 'on';
+            } else {
+                state = 'out';
+            }
+        }
+
+        return JSON.stringify({
+            point,
+            tolerance,
+            state,
+            isInside: state === 'in' || state === 'on',
+        });
+    }
+
+    findClosestPointOnShape(id: number, pointJson: string, tolerance: number): string {
+        const shape = this._require(id);
+        const point = JSON.parse(pointJson) as [number, number, number];
+        const bounds = this._boundingBox(shape);
+        const closestPoint = this._closestPointOnBounds(point, bounds);
+        const dx = point[0] - closestPoint[0];
+        const dy = point[1] - closestPoint[1];
+        const dz = point[2] - closestPoint[2];
+        const analysis = this._analysis(shape);
+
+        return JSON.stringify({
+            queryPoint: point,
+            closestPoint,
+            distance: Math.sqrt(dx * dx + dy * dy + dz * dz),
+            solutionCount: 1,
+            support: {
+                kind: 'face',
+                topoId: analysis.faceCount > 0 ? 1 : undefined,
+                stableHash: analysis.faceCount > 0 ? this._stableHashes(shape, 'face', analysis.faceCount)[0] : undefined,
+                uv: [0.5, 0.5],
+            },
+            tolerance,
+        });
+    }
+
+    measureShapeDistance(id1: number, id2: number, tolerance: number): string {
+        const shapeA = this._require(id1);
+        const shapeB = this._require(id2);
+        const boundsA = this._boundingBox(shapeA);
+        const boundsB = this._boundingBox(shapeB);
+        const closest = this._distanceBetweenBounds(boundsA, boundsB);
+        const analysisA = this._analysis(shapeA);
+        const analysisB = this._analysis(shapeB);
+
+        return JSON.stringify({
+            distance: closest.distance,
+            clearance: closest.distance,
+            innerSolution: false,
+            isInContact: closest.distance <= tolerance,
+            solutionCount: 1,
+            solutions: [{
+                pointOnA: closest.pointOnA,
+                pointOnB: closest.pointOnB,
+                supportOnA: {
+                    kind: 'face',
+                    topoId: analysisA.faceCount > 0 ? 1 : undefined,
+                    stableHash: analysisA.faceCount > 0 ? this._stableHashes(shapeA, 'face', analysisA.faceCount)[0] : undefined,
+                    uv: [0.5, 0.5],
+                },
+                supportOnB: {
+                    kind: 'face',
+                    topoId: analysisB.faceCount > 0 ? 1 : undefined,
+                    stableHash: analysisB.faceCount > 0 ? this._stableHashes(shapeB, 'face', analysisB.faceCount)[0] : undefined,
+                    uv: [0.5, 0.5],
+                },
+            }],
         });
     }
 
@@ -1029,13 +1538,36 @@ export class MockNativeKernel {
     resolveStableEntity(id: number, stableHash: string): string {
         const shape = this._require(id);
         const revision = this._revisionInfo(id);
-        const match = /^(F|E|V):mock_[^_]+_(\d+)$/.exec(stableHash);
-        if (match) {
+        const analysis = this._analysis(shape);
+        const faceIndex = this._stableHashes(shape, 'face', analysis.faceCount).indexOf(stableHash);
+        if (faceIndex >= 0) {
             return JSON.stringify({
                 found: true,
                 status: 'active',
-                kind: match[1] === 'F' ? 'face' : match[1] === 'E' ? 'edge' : 'vertex',
-                id: Number(match[2]),
+                kind: 'face',
+                id: faceIndex + 1,
+                stableHash,
+                revisionId: revision.revisionId,
+            });
+        }
+        const edgeIndex = this._stableHashes(shape, 'edge', analysis.edgeCount).indexOf(stableHash);
+        if (edgeIndex >= 0) {
+            return JSON.stringify({
+                found: true,
+                status: 'active',
+                kind: 'edge',
+                id: edgeIndex + 1,
+                stableHash,
+                revisionId: revision.revisionId,
+            });
+        }
+        const vertexIndex = this._stableHashes(shape, 'vertex', analysis.vertexCount).indexOf(stableHash);
+        if (vertexIndex >= 0) {
+            return JSON.stringify({
+                found: true,
+                status: 'active',
+                kind: 'vertex',
+                id: vertexIndex + 1,
                 stableHash,
                 revisionId: revision.revisionId,
             });
@@ -1228,6 +1760,12 @@ export class MockNativeKernel {
                 },
                 filletEdges: { schemaVersion: 1, nativeExact: true },
                 chamferEdges: { schemaVersion: 1, nativeExact: true },
+                getVersionInfo: { schemaVersion: 1, nativeExact: true, sessionScoped: true },
+                analyzeShape: { schemaVersion: 1, nativeExact: true, pointContainment: true },
+                classifyPointContainment: { schemaVersion: 1, nativeExact: true, states: ['in', 'out', 'on', 'unknown'] },
+                intersectShapes: { schemaVersion: 1, nativeExact: true, returnsSectionShape: true },
+                findClosestPointOnShape: { schemaVersion: 1, nativeExact: true, supportKinds: ['vertex', 'edge', 'face'] },
+                measureShapeDistance: { schemaVersion: 1, nativeExact: true, multipleSolutions: true, supportKinds: ['vertex', 'edge', 'face'] },
                 evaluateEdge: { schemaVersion: 1, nativeExact: true },
                 sampleEdge: { schemaVersion: 1, nativeExact: true },
                 getEdgeCurve: { schemaVersion: 1, nativeExact: true },
@@ -1243,14 +1781,18 @@ export class MockNativeKernel {
             triangleNormalsV1: true,
             triangleFaceMappingV1: true,
             topologySubshapesV1: true,
+            topologyHierarchyV1: true,
             geometricStableHashesV1: true,
             revisionInfoV1: true,
             entityResolutionV1: true,
             entityRemapV1: true,
             revisionRetentionV1: true,
             historyV1: true,
-            stableNamingV1: false,
+            stableNamingV1: true,
             checkpointV1: true,
+            versionInfoV1: true,
+            analysisV1: true,
+            sessionHandlesV1: true,
             operations: {
                 structuredSpecsV1: true,
                 operationSchemaV1: true,
@@ -1367,6 +1909,23 @@ export class MockNativeKernel {
                 getEdgeCurve: true,
                 evaluateFace: true,
                 parameterModes: ['normalized', 'native'],
+            },
+            analysis: {
+                volume: true,
+                surfaceArea: true,
+                linearLength: true,
+                boundingBox: true,
+                centerOfMass: true,
+                shapeValidity: true,
+                pointContainment: true,
+                shapeIntersection: true,
+                closestPoint: true,
+                shapeDistance: true,
+            },
+            runtime: {
+                browser: true,
+                worker: true,
+                node: true,
             },
         });
     }
@@ -1501,7 +2060,13 @@ export class MockNativeKernel {
     }
 
     hydrateCheckpoint(checkpointJson: string): number {
-        const checkpoint = JSON.parse(checkpointJson) as { revision?: Record<string, unknown> };
+        let checkpoint: { revision?: Record<string, unknown> };
+        try {
+            checkpoint = JSON.parse(checkpointJson) as { revision?: Record<string, unknown> };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Checkpoint JSON is invalid';
+            throw new KernelError('INVALID_CHECKPOINT', message);
+        }
         const revisionInfo = {
             ...(checkpoint.revision ?? {}),
             createdFromCheckpoint: true,

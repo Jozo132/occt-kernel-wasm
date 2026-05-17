@@ -57,6 +57,12 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         .function("evaluateFace", &OcctKernel::evaluateFace)
         .function("getOperationSchema", &OcctKernel::getOperationSchema)
         .function("getCapabilities", &OcctKernel::getCapabilities)
+        .function("getKernelVersionInfo", &OcctKernel::getKernelVersionInfo)
+        .function("analyzeShape", &OcctKernel::analyzeShape)
+        .function("classifyPointContainment", &OcctKernel::classifyPointContainment)
+        .function("intersectShapes", &OcctKernel::intersectShapes)
+        .function("findClosestPointOnShape", &OcctKernel::findClosestPointOnShape)
+        .function("measureShapeDistance", &OcctKernel::measureShapeDistance)
         .function("checkValidity",  &OcctKernel::checkValidity)
 
         // Tessellation
