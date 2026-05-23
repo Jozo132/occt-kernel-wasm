@@ -9,6 +9,36 @@ const distDir = join(__dirname, '..', '..', 'dist');
 const hasBuiltKernel = ['index.js', 'occt-kernel.js', 'occt-kernel.wasm'].every((fileName) => existsSync(join(distDir, fileName)));
 const describeIfBuilt = hasBuiltKernel ? describe : describe.skip;
 
+function expectBlendFacesResolveToFinalTopology(
+    blendFaces: ReadonlyArray<{
+        stableHash: string | null;
+        topoFaceId?: number;
+        finalOutputFaceRef?: { stableHash?: string; topoFaceId?: number };
+        finalOutputFaceRefs?: readonly { stableHash?: string; topoFaceId?: number }[];
+    }>,
+    faces: ReadonlyArray<{ id: number; stableHash?: string }> | undefined,
+): string[] {
+    expect(blendFaces.length).toBeGreaterThan(0);
+    const finalFaces = faces ?? [];
+    const stableHashes: string[] = [];
+    for (const blendFace of blendFaces) {
+        const refs: readonly { stableHash?: string | null; topoFaceId?: number }[] = blendFace.finalOutputFaceRefs
+            ?? (blendFace.finalOutputFaceRef !== undefined ? [blendFace.finalOutputFaceRef] : [blendFace]);
+        expect(refs.length).toBeGreaterThan(0);
+        for (const ref of refs) {
+            const resolves = finalFaces.some((face) =>
+                (typeof ref.stableHash === 'string' && face.stableHash === ref.stableHash)
+                || (Number.isInteger(ref.topoFaceId) && face.id === ref.topoFaceId),
+            );
+            expect(resolves).toBe(true);
+            if (typeof ref.stableHash === 'string') {
+                stableHashes.push(ref.stableHash);
+            }
+        }
+    }
+    return stableHashes;
+}
+
 describeIfBuilt('Real WASM analysis queries', () => {
     let kernel: OcctKernel;
 
@@ -119,6 +149,82 @@ describeIfBuilt('Real WASM analysis queries', () => {
         } finally {
             kernel.disposeShape({ shape: movedCutter });
             kernel.disposeShape({ shape: cutter });
+            kernel.disposeShape({ shape: box });
+        }
+    });
+
+    it('resolves fillet blend faces against the final topology and tessellation hashes', () => {
+        const box = kernel.createBox({ dx: 4, dy: 5, dz: 6 });
+        let filletResult: ReturnType<typeof kernel.filletEdgesWithSpec> | undefined;
+
+        try {
+            const sourceTopology = kernel.getTopology(box);
+            const sourceEdge = sourceTopology.edges?.[0];
+            const sourceEdgeStableHash = sourceEdge?.stableHash;
+
+            expect(sourceEdgeStableHash).toBeDefined();
+            if (sourceEdgeStableHash === undefined) {
+                throw new Error('Expected a source edge stable hash for fillet blend validation');
+            }
+
+            filletResult = kernel.filletEdgesWithSpec({
+                shape: box,
+                spec: {
+                    schemaVersion: 1,
+                    edges: [{ stableHash: sourceEdgeStableHash, radius: 0.4 }],
+                },
+            });
+
+            const topo = kernel.getTopology(filletResult.shape);
+            const stableHashes = expectBlendFacesResolveToFinalTopology(filletResult.blendFaces, topo.faces);
+            const mesh = kernel.tessellate({ shape: filletResult.shape, linearDeflection: 0.4, angularDeflection: 0.35 });
+
+            expect(mesh.triangleStableHashes).toBeDefined();
+            for (const stableHash of stableHashes) {
+                expect(mesh.triangleStableHashes ?? []).toContain(stableHash);
+            }
+        } finally {
+            if (filletResult !== undefined) {
+                kernel.disposeShape({ shape: filletResult.shape });
+            }
+            kernel.disposeShape({ shape: box });
+        }
+    });
+
+    it('resolves chamfer blend faces against the final topology and tessellation hashes', () => {
+        const box = kernel.createBox({ dx: 4, dy: 5, dz: 6 });
+        let chamferResult: ReturnType<typeof kernel.chamferEdgesWithSpec> | undefined;
+
+        try {
+            const sourceTopology = kernel.getTopology(box);
+            const sourceEdge = sourceTopology.edges?.[0];
+            const sourceEdgeStableHash = sourceEdge?.stableHash;
+
+            expect(sourceEdgeStableHash).toBeDefined();
+            if (sourceEdgeStableHash === undefined) {
+                throw new Error('Expected a source edge stable hash for chamfer blend validation');
+            }
+
+            chamferResult = kernel.chamferEdgesWithSpec({
+                shape: box,
+                spec: {
+                    schemaVersion: 1,
+                    edges: [{ stableHash: sourceEdgeStableHash, distance: 0.35 }],
+                },
+            });
+
+            const topo = kernel.getTopology(chamferResult.shape);
+            const stableHashes = expectBlendFacesResolveToFinalTopology(chamferResult.blendFaces, topo.faces);
+            const mesh = kernel.tessellate({ shape: chamferResult.shape, linearDeflection: 0.4, angularDeflection: 0.35 });
+
+            expect(mesh.triangleStableHashes).toBeDefined();
+            for (const stableHash of stableHashes) {
+                expect(mesh.triangleStableHashes ?? []).toContain(stableHash);
+            }
+        } finally {
+            if (chamferResult !== undefined) {
+                kernel.disposeShape({ shape: chamferResult.shape });
+            }
             kernel.disposeShape({ shape: box });
         }
     });

@@ -439,6 +439,31 @@ describe('chamferEdges', () => {
 });
 
 describe('structured blend operations', () => {
+    const expectBlendFacesResolveToFinalTopology = (
+        blendFaces: ReadonlyArray<{
+            stableHash: string | null;
+            topoFaceId?: number;
+            finalOutputFaceRef?: { stableHash?: string; topoFaceId?: number };
+            finalOutputFaceRefs?: readonly { stableHash?: string; topoFaceId?: number }[];
+        }>,
+        faces: ReadonlyArray<{ id: number; stableHash?: string }> | undefined,
+    ) => {
+        expect(blendFaces.length).toBeGreaterThan(0);
+        const finalFaces = faces ?? [];
+        for (const blendFace of blendFaces) {
+            const refs: readonly { stableHash?: string | null; topoFaceId?: number }[] = blendFace.finalOutputFaceRefs
+                ?? (blendFace.finalOutputFaceRef !== undefined ? [blendFace.finalOutputFaceRef] : [blendFace]);
+            expect(refs.length).toBeGreaterThan(0);
+            for (const ref of refs) {
+                const resolves = finalFaces.some((face) =>
+                    (typeof ref.stableHash === 'string' && face.stableHash === ref.stableHash)
+                    || (Number.isInteger(ref.topoFaceId) && face.id === ref.topoFaceId),
+                );
+                expect(resolves).toBe(true);
+            }
+        }
+    };
+
     it('returns exact fillet lineage and a resident shape handle', () => {
         const k = makeKernel();
         const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
@@ -457,6 +482,7 @@ describe('structured blend operations', () => {
         expect(result.status.isExact).toBe(true);
         expect(result.blendFaces[0]).toMatchObject({ kind: 'filletFace' });
         expect(result.topology.revisionId).toBe(result.revision.revisionId);
+        expectBlendFacesResolveToFinalTopology(result.blendFaces, k.getTopology(result.shape).faces);
     });
 
     it('returns exact chamfer lineage with reference-face parameters', () => {
@@ -474,6 +500,7 @@ describe('structured blend operations', () => {
         expect(result.shape.id).toBeGreaterThan(0);
         expect(result.blendFaces[0]).toMatchObject({ kind: 'chamferFace' });
         expect(result.lineage.deleted[0]).toMatch(/^E:/);
+        expectBlendFacesResolveToFinalTopology(result.blendFaces, k.getTopology(result.shape).faces);
     });
 
     it('throws a structured unsupported error for partial-edge fillets', () => {

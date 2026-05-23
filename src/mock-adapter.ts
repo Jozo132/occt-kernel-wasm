@@ -448,17 +448,29 @@ export class MockNativeKernel {
 
     private _blendResult(shapeId: number, kind: 'filletFace' | 'chamferFace', edgeCount: number): string {
         const revision = this._revisionInfo(shapeId);
-        const topology = JSON.parse(this.getTopology(shapeId)) as Record<string, unknown>;
-        const blendFaces = Array.from({ length: edgeCount }, (_, index) => ({
-            kind,
-            stableHash: `${kind === 'filletFace' ? 'F' : 'C'}:mock_blend_${shapeId}_${index + 1}`,
-            sourceEdge: { topoId: index + 1, stableHash: `E:mock_source_${index + 1}` },
-            tangentChainEdgeRefs: [{ topoId: index + 1, stableHash: `E:mock_source_${index + 1}` }],
-            usedParameters: {},
-            supportingFaceIds: [1, 2],
-            terminalCapIds: [],
-            terminalCondition: 'unresolved',
-        }));
+        const topology = JSON.parse(this.getTopology(shapeId)) as { faces?: Array<{ id?: number; stableHash?: string }> };
+        const topologyFaces = Array.isArray(topology.faces) ? topology.faces : [];
+        const blendFaces = Array.from({ length: edgeCount }, (_, index) => {
+            const finalFace = topologyFaces.length > 0 ? topologyFaces[index % topologyFaces.length] : undefined;
+            const finalOutputFaceRef = finalFace !== undefined && typeof finalFace.id === 'number'
+                ? {
+                    stableHash: finalFace.stableHash,
+                    topoFaceId: finalFace.id,
+                }
+                : undefined;
+            return {
+                kind,
+                stableHash: finalOutputFaceRef?.stableHash ?? null,
+                topoFaceId: finalOutputFaceRef?.topoFaceId,
+                finalOutputFaceRef,
+                sourceEdge: { topoId: index + 1, stableHash: `E:mock_source_${index + 1}` },
+                tangentChainEdgeRefs: [{ topoId: index + 1, stableHash: `E:mock_source_${index + 1}` }],
+                usedParameters: {},
+                supportingFaceIds: [1, 2],
+                terminalCapIds: [],
+                terminalCondition: 'unresolved',
+            };
+        });
         return JSON.stringify({
             shapeId,
             revision,

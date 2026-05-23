@@ -2122,62 +2122,111 @@ std::vector<int> supportFaceIdsForEdge(const TopoDS_Shape& shape, const TopoDS_E
     return faceIdsForEdge(edge, faceMap, edgeToFaces);
 }
 
-std::string faceHashForOutputFace(const TopoDS_Shape& maybeFace) {
-    if (maybeFace.IsNull() || maybeFace.ShapeType() != TopAbs_FACE) {
-        return "";
+template <typename ShapeListT>
+void appendHistoryResultIndices(const ShapeListT& list,
+                                const ShapeMap& resultMap,
+                                TopAbs_ShapeEnum kind,
+                                std::vector<int>& indices);
+
+template <typename Builder>
+std::vector<int> historyResultIndices(Builder& builder,
+                                      const TopoDS_Shape& sourceShape,
+                                      const ShapeMap& resultMap,
+                                      TopAbs_ShapeEnum kind);
+
+void appendBlendOutputFaceRefJson(std::ostringstream& out, const ResolvedFaceRef& face) {
+    out << '{';
+    out << "\"stableHash\":"; appendJsonString(out, face.stableHash); out << ',';
+    out << "\"topoFaceId\":" << face.topoId;
+    out << '}';
+}
+
+void appendBlendOutputFaceRefsJson(std::ostringstream& out, const std::vector<ResolvedFaceRef>& faces) {
+    out << '[';
+    for (std::size_t i = 0; i < faces.size(); ++i) {
+        if (i > 0) out << ',';
+        appendBlendOutputFaceRefJson(out, faces[i]);
     }
-    return makeFaceStableHash(TopoDS::Face(maybeFace));
+    out << ']';
+}
+
+template <typename BlendBuilder>
+std::vector<ResolvedFaceRef> resolveBlendOutputFaces(BlendBuilder& builder,
+                                                     const ShapeMap& resultFaces,
+                                                     const std::vector<std::string>& faceHashes,
+                                                     const ResolvedEdgeRef& edge) {
+    std::vector<int> finalFaceIds;
+    const ShapeList& generatedFaces = builder.Generated(edge.edge);
+    appendHistoryResultIndices(generatedFaces, resultFaces, TopAbs_FACE, finalFaceIds);
+
+    for (ShapeList::Iterator it(generatedFaces); it.More(); it.Next()) {
+        const TopoDS_Shape& generatedFace = it.Value();
+        if (generatedFace.IsNull() || generatedFace.ShapeType() != TopAbs_FACE) {
+            continue;
+        }
+
+        const std::vector<int> descendantFaceIds = historyResultIndices(builder, generatedFace, resultFaces, TopAbs_FACE);
+        for (int faceId : descendantFaceIds) {
+            if (std::find(finalFaceIds.begin(), finalFaceIds.end(), faceId) == finalFaceIds.end()) {
+                finalFaceIds.push_back(faceId);
+            }
+        }
+    }
+
+    std::sort(finalFaceIds.begin(), finalFaceIds.end());
+
+    std::vector<ResolvedFaceRef> resolvedFaces;
+    resolvedFaces.reserve(finalFaceIds.size());
+    for (int faceId : finalFaceIds) {
+        if (faceId < 1 || faceId > resultFaces.Extent()) {
+            continue;
+        }
+        resolvedFaces.push_back({ TopoDS::Face(resultFaces(faceId)), faceId, faceHashes[static_cast<std::size_t>(faceId)] });
+    }
+    return resolvedFaces;
 }
 
 template <typename BlendBuilder>
 void appendBlendFacesJson(std::ostringstream& out,
                           BlendBuilder& builder,
                           const TopoDS_Shape& sourceShape,
+                          const TopoDS_Shape& resultShape,
+                          const RevisionMetadata& resultRevision,
                           const std::vector<ResolvedEdgeRef>& edges,
                           const std::vector<std::string>& normalizedParameters,
                           const std::string& faceKind) {
+    ShapeMap resultFaces;
+    TopExp::MapShapes(resultShape, TopAbs_FACE, resultFaces);
+    const std::vector<std::string> faceHashes = faceStableHashesForShape(resultShape, &resultRevision);
+
     out << '[';
     bool firstFace = true;
     for (std::size_t i = 0; i < edges.size(); ++i) {
-        const ShapeList& generated = builder.Generated(edges[i].edge);
-        std::vector<std::string> generatedFaceHashes;
-        for (ShapeList::Iterator it(generated); it.More(); it.Next()) {
-            const std::string stableHash = faceHashForOutputFace(it.Value());
-            if (!stableHash.empty()) {
-                generatedFaceHashes.push_back(stableHash);
-            }
-        }
+        const std::vector<ResolvedFaceRef> finalFaces = resolveBlendOutputFaces(builder, resultFaces, faceHashes, edges[i]);
 
-        if (generatedFaceHashes.empty()) {
-            if (!firstFace) out << ',';
-            firstFace = false;
-            out << '{';
-            out << "\"kind\":"; appendJsonString(out, faceKind); out << ',';
+        if (!firstFace) out << ',';
+        firstFace = false;
+        out << '{';
+        out << "\"kind\":"; appendJsonString(out, faceKind); out << ',';
+        if (finalFaces.size() == 1) {
+            out << "\"stableHash\":"; appendJsonString(out, finalFaces[0].stableHash); out << ',';
+            out << "\"topoFaceId\":" << finalFaces[0].topoId << ',';
+            out << "\"finalOutputFaceRef\":";
+            appendBlendOutputFaceRefJson(out, finalFaces[0]);
+            out << ',';
+        } else {
             out << "\"stableHash\":null,";
-            out << "\"sourceEdge\":"; appendEntityRefJson(out, edges[i]); out << ',';
-            out << "\"tangentChainEdgeRefs\":["; appendEntityRefJson(out, edges[i]); out << "],";
-            out << "\"usedParameters\":" << normalizedParameters[i] << ',';
-            out << "\"supportingFaceIds\":"; appendIntArrayJson(out, supportFaceIdsForEdge(sourceShape, edges[i].edge)); out << ',';
-            out << "\"terminalCapIds\":[],";
-            out << "\"terminalCondition\":\"unresolved\"";
-            out << '}';
-            continue;
+            out << "\"finalOutputFaceRefs\":";
+            appendBlendOutputFaceRefsJson(out, finalFaces);
+            out << ',';
         }
-
-        for (const std::string& stableHash : generatedFaceHashes) {
-            if (!firstFace) out << ',';
-            firstFace = false;
-            out << '{';
-            out << "\"kind\":"; appendJsonString(out, faceKind); out << ',';
-            out << "\"stableHash\":"; appendJsonString(out, stableHash); out << ',';
-            out << "\"sourceEdge\":"; appendEntityRefJson(out, edges[i]); out << ',';
-            out << "\"tangentChainEdgeRefs\":["; appendEntityRefJson(out, edges[i]); out << "],";
-            out << "\"usedParameters\":" << normalizedParameters[i] << ',';
-            out << "\"supportingFaceIds\":"; appendIntArrayJson(out, supportFaceIdsForEdge(sourceShape, edges[i].edge)); out << ',';
-            out << "\"terminalCapIds\":[],";
-            out << "\"terminalCondition\":\"unresolved\"";
-            out << '}';
-        }
+        out << "\"sourceEdge\":"; appendEntityRefJson(out, edges[i]); out << ',';
+        out << "\"tangentChainEdgeRefs\":["; appendEntityRefJson(out, edges[i]); out << "],";
+        out << "\"usedParameters\":" << normalizedParameters[i] << ',';
+        out << "\"supportingFaceIds\":"; appendIntArrayJson(out, supportFaceIdsForEdge(sourceShape, edges[i].edge)); out << ',';
+        out << "\"terminalCapIds\":[],";
+        out << "\"terminalCondition\":\"unresolved\"";
+        out << '}';
     }
     out << ']';
 }
@@ -2185,13 +2234,15 @@ void appendBlendFacesJson(std::ostringstream& out,
 template <typename BlendBuilder>
 std::string makeBlendResultJson(OcctKernel* kernel,
                                 uint32_t shapeId,
+                                const TopoDS_Shape& resultShape,
+                                const RevisionMetadata& resultRevision,
                                 BlendBuilder& builder,
                                 const TopoDS_Shape& sourceShape,
                                 const std::vector<ResolvedEdgeRef>& edges,
                                 const std::vector<std::string>& normalizedParameters,
                                 const std::string& faceKind) {
     std::ostringstream generatedFaces;
-    appendBlendFacesJson(generatedFaces, builder, sourceShape, edges, normalizedParameters, faceKind);
+    appendBlendFacesJson(generatedFaces, builder, sourceShape, resultShape, resultRevision, edges, normalizedParameters, faceKind);
 
     std::vector<std::string> deletedEdges;
     for (const ResolvedEdgeRef& edge : edges) {
@@ -3957,23 +4008,32 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                                                          "resolved",
                                                          { "Stable semantic subshape ids are propagated through exact OCCT fillet history; explicit blend lineage remains available in the result payload." });
         auto resultIt = _impl->records.find(resultId);
-        if (resultIt != _impl->records.end()) {
-            applyHistoryStableHashes(resultIt->second.shape,
-                                     resultIt->second.revision,
-                                     { &sourceIt->second },
-                                     mkFillet);
-            for (const ResolvedEdgeRef& edge : appliedEdges) {
-                const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
-                                                    resultIt->second.revision.deletedEntities.end(),
-                                                    [&](const DeletedEntityRecord& record) {
-                                                        return record.kind == "edge" && record.stableHash == edge.stableHash;
-                                                    });
-                if (duplicate == resultIt->second.revision.deletedEntities.end()) {
-                    resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
-                }
+        if (resultIt == _impl->records.end()) {
+            throwKernelError("OPERATION_FAILED", "Stored fillet result is unavailable");
+        }
+        applyHistoryStableHashes(resultIt->second.shape,
+                                 resultIt->second.revision,
+                                 { &sourceIt->second },
+                                 mkFillet);
+        for (const ResolvedEdgeRef& edge : appliedEdges) {
+            const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
+                                                resultIt->second.revision.deletedEntities.end(),
+                                                [&](const DeletedEntityRecord& record) {
+                                                    return record.kind == "edge" && record.stableHash == edge.stableHash;
+                                                });
+            if (duplicate == resultIt->second.revision.deletedEntities.end()) {
+                resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
             }
         }
-        return makeBlendResultJson(this, resultId, mkFillet, shape, appliedEdges, normalizedParameters, "filletFace");
+        return makeBlendResultJson(this,
+                                   resultId,
+                                   resultIt->second.shape,
+                                   resultIt->second.revision,
+                                   mkFillet,
+                                   shape,
+                                   appliedEdges,
+                                   normalizedParameters,
+                                   "filletFace");
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
@@ -4130,23 +4190,32 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                                                          "resolved",
                                                          { "Stable semantic subshape ids are propagated through exact OCCT chamfer history; explicit blend lineage remains available in the result payload." });
         auto resultIt = _impl->records.find(resultId);
-        if (resultIt != _impl->records.end()) {
-            applyHistoryStableHashes(resultIt->second.shape,
-                                     resultIt->second.revision,
-                                     { &sourceIt->second },
-                                     mkChamfer);
-            for (const ResolvedEdgeRef& edge : appliedEdges) {
-                const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
-                                                    resultIt->second.revision.deletedEntities.end(),
-                                                    [&](const DeletedEntityRecord& record) {
-                                                        return record.kind == "edge" && record.stableHash == edge.stableHash;
-                                                    });
-                if (duplicate == resultIt->second.revision.deletedEntities.end()) {
-                    resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
-                }
+        if (resultIt == _impl->records.end()) {
+            throwKernelError("OPERATION_FAILED", "Stored chamfer result is unavailable");
+        }
+        applyHistoryStableHashes(resultIt->second.shape,
+                                 resultIt->second.revision,
+                                 { &sourceIt->second },
+                                 mkChamfer);
+        for (const ResolvedEdgeRef& edge : appliedEdges) {
+            const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
+                                                resultIt->second.revision.deletedEntities.end(),
+                                                [&](const DeletedEntityRecord& record) {
+                                                    return record.kind == "edge" && record.stableHash == edge.stableHash;
+                                                });
+            if (duplicate == resultIt->second.revision.deletedEntities.end()) {
+                resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
             }
         }
-        return makeBlendResultJson(this, resultId, mkChamfer, shape, appliedEdges, normalizedParameters, "chamferFace");
+        return makeBlendResultJson(this,
+                                   resultId,
+                                   resultIt->second.shape,
+                                   resultIt->second.revision,
+                                   mkChamfer,
+                                   shape,
+                                   appliedEdges,
+                                   normalizedParameters,
+                                   "chamferFace");
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {

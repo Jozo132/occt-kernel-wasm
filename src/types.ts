@@ -536,9 +536,17 @@ export interface ChamferFeatureParams {
     readonly spec: ChamferSpec;
 }
 
+export interface BlendOutputFaceRef {
+    readonly stableHash?: string;
+    readonly topoFaceId?: number;
+}
+
 export interface BlendFaceResult {
     readonly kind: 'filletFace' | 'chamferFace';
     readonly stableHash: string | null;
+    readonly topoFaceId?: number;
+    readonly finalOutputFaceRef?: BlendOutputFaceRef;
+    readonly finalOutputFaceRefs?: readonly BlendOutputFaceRef[];
     readonly sourceEdge: EdgeRef;
     readonly tangentChainEdgeRefs: readonly EdgeRef[];
     readonly usedParameters: Record<string, unknown>;
