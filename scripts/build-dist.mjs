@@ -31,6 +31,7 @@ function printElapsedTime() {
 
 async function cleanDistArtifacts() {
     const entries = await readdir(distDir, { withFileTypes: true });
+    const keepFiles = new Set(['occt-kernel.js', 'occt-kernel.wasm']);
 
     await Promise.all(
         entries.map(async (entry) => {
@@ -39,18 +40,11 @@ async function cleanDistArtifacts() {
             }
 
             const { name } = entry;
-            if (name === 'occt-kernel.js' || name === 'occt-kernel.wasm') {
+            if (keepFiles.has(name)) {
                 return;
             }
 
-            if (
-                name.endsWith('.js')
-                || name.endsWith('.mjs')
-                || name.endsWith('.map')
-                || name.endsWith('.d.ts')
-            ) {
-                await rm(path.join(distDir, name), { force: true });
-            }
+            await rm(path.join(distDir, name), { force: true });
         }),
     );
 }

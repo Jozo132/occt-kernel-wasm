@@ -21,6 +21,8 @@
   },
   "files": [
     "dist/",
+    "README.md",
+    "LICENSE",
     "NOTICE",
     "THIRD_PARTY_LICENSES.md"
   ],
@@ -34,7 +36,8 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "lint": "tsc --project tsconfig.check.json",
-    "prepublishOnly": "npm run build"
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm run build && npm run pack:check"
   },
   "keywords": [
     "occt",
@@ -49,7 +52,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Jozo132/occt-kernel-wasm.git"
+    "url": "git+https://github.com/Jozo132/occt-kernel-wasm.git"
   },
   "bugs": {
     "url": "https://github.com/Jozo132/occt-kernel-wasm/issues"
