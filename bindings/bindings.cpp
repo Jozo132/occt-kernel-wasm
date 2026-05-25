@@ -71,6 +71,7 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         // Import / export
         .function("importStep", &OcctKernel::importStep)
         .function("importStepDetailed", &OcctKernel::importStepDetailed)
+        .function("importStepPackage", &OcctKernel::importStepPackage)
         .function("exportStep", &OcctKernel::exportStep)
         .function("createCheckpoint", &OcctKernel::createCheckpoint)
         .function("hydrateCheckpoint", &OcctKernel::hydrateCheckpoint)

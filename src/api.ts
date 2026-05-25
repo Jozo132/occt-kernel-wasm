@@ -42,6 +42,8 @@ export type {
     FilletRadiusLaw,
     FilletSpec,
     ImportStepParams,
+    ImportStepPackageParams,
+    ImportStepPackageResult,
     KernelCapabilities,
     HydrateCheckpointParams,
     LoftFeatureParams,

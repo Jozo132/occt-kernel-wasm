@@ -1309,6 +1309,99 @@ describe('importStep', () => {
     });
 });
 
+describe('importStepPackage', () => {
+    const validStep = [
+        'ISO-10303-21;',
+        'HEADER;',
+        "FILE_DESCRIPTION(('test'),'2;1');",
+        "FILE_NAME('','',(''),(''),'','','');",
+        "FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));",
+        'ENDSEC;',
+        'DATA;',
+        'ENDSEC;',
+        'END-ISO-10303-21;',
+    ].join('\n');
+
+    it('returns a fully fused result package with mesh, properties, topology, and checkpoint', () => {
+        const k = makeKernel();
+        const result = k.importStepPackage({
+            content: validStep,
+            options: {
+                linearDeflection: 0.1,
+                angularDeflection: 0.5,
+            }
+        });
+
+        expect(result.readStatus).toBe('IFSelect_RetDone');
+        expect(result.transferStatus).toBe('DONE');
+        expect(result.isValid).toBe(true);
+        expect(result.healed).toBe(false);
+        expect(result.messageList).toBeDefined();
+
+        expect(result.shape).toBeDefined();
+        expect(result.shape?.id).toBeGreaterThan(0);
+
+        expect(result.revision).toBeDefined();
+        expect(typeof result.revision?.revisionId).toBe('string');
+        expect(typeof result.revision?.topologyHash).toBe('string');
+
+        expect(result.topology).toBeDefined();
+        expect(typeof result.topology?.faceCount).toBe('number');
+        expect(typeof result.topology?.edgeCount).toBe('number');
+        expect(typeof result.topology?.vertexCount).toBe('number');
+
+        expect(result.properties).toBeDefined();
+        expect(result.properties?.boundingBox).toBeDefined();
+        expect(typeof result.properties?.volume).toBe('number');
+
+        expect(result.checkpoint).toBeDefined();
+        expect(result.checkpoint?.checkpointSchemaVersion).toBe(1);
+        expect(typeof result.checkpoint?.brep).toBe('string');
+
+        // Ensure we can hydrate the checkpoint back
+        const hydrated = k.hydrateCheckpoint({ checkpoint: result.checkpoint! });
+        expect(hydrated.id).toBeGreaterThan(0);
+
+        // Ensure we have the mesh arrays populated correctly as TypedArrays
+        expect(result.mesh).toBeDefined();
+        expect(result.mesh?.positions).toBeInstanceOf(Float32Array);
+        expect(result.mesh?.normals).toBeInstanceOf(Float32Array);
+        expect(result.mesh?.indices).toBeInstanceOf(Uint32Array);
+        expect(result.mesh?.triangleNormals).toBeInstanceOf(Float32Array);
+        expect(result.mesh?.triangleTopoFaceIds).toBeInstanceOf(Uint32Array);
+        expect(result.mesh?.triangleFaceGroups).toBeInstanceOf(Uint32Array);
+        expect(Array.isArray(result.mesh?.triangleStableHashes)).toBe(true);
+        expect(Array.isArray(result.mesh?.featureEdges)).toBe(true);
+    });
+
+    it('skips mesh computation if deflection options are <= 0', () => {
+        const k = makeKernel();
+        const result = k.importStepPackage({
+            content: validStep,
+            options: {
+                linearDeflection: -1,
+                angularDeflection: -1,
+            }
+        });
+
+        expect(result.readStatus).toBe('IFSelect_RetDone');
+        expect(result.shape).toBeDefined();
+        expect(result.mesh).toBeUndefined();
+    });
+
+    it('returns empty shape and mesh fields on invalid STEP string without throwing', () => {
+        const k = makeKernel();
+        const result = k.importStepPackage({ content: 'invalid step file' });
+
+        expect(result.readStatus).toBe('IFSelect_RetFail');
+        expect(result.transferStatus).toBe('FAILED');
+        expect(result.shape).toBeUndefined();
+        expect(result.mesh).toBeUndefined();
+        expect(result.properties).toBeUndefined();
+        expect(result.checkpoint).toBeUndefined();
+    });
+});
+
 describe('exportStep', () => {
     it('returns a non-empty string', () => {
         const k = makeKernel();

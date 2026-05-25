@@ -5672,6 +5672,163 @@ std::string OcctKernel::importStepDetailed(const std::string& content,
     return buildStepImportResultJson(result, shapeId);
 }
 
+std::string OcctKernel::importStepPackage(const std::string& content,
+                                         bool heal,
+                                         bool sew,
+                                         bool fixSameParameter,
+                                         bool fixSolid,
+                                         double sewingTolerance,
+                                         double linearDeflection,
+                                         double angularDeflection) {
+    StepImportOptions options;
+    options.heal = heal;
+    options.sew = sew;
+    options.fixSameParameter = fixSameParameter;
+    options.fixSolid = fixSolid;
+    options.sewingTolerance = sewingTolerance > 0 ? sewingTolerance : 1.0e-6;
+
+    StepImportRunResult result = runStepImport(content, options);
+    
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"readStatus\":\"" << escapeJson(result.readStatus) << "\",";
+    ss << "\"transferStatus\":\"" << escapeJson(result.transferStatus) << "\",";
+    ss << "\"healed\":" << (result.healed ? "true" : "false") << ",";
+    ss << "\"isValid\":" << (result.isValid ? "true" : "false") << ",";
+    
+    ss << "\"messageList\":[";
+    for (std::size_t i = 0; i < result.messages.size(); ++i) {
+        const StepImportMessage& message = result.messages[i];
+        if (i > 0) {
+            ss << ",";
+        }
+        ss << "{";
+        ss << "\"phase\":\"" << escapeJson(message.phase) << "\",";
+        ss << "\"severity\":\"" << escapeJson(message.severity) << "\",";
+        ss << "\"text\":\"" << escapeJson(message.text) << "\"";
+        if (message.entityNumber > 0) {
+            ss << ",\"entityNumber\":" << message.entityNumber;
+        }
+        ss << "}";
+    }
+    ss << "]";
+
+    if (result.hasShape) {
+        uint32_t shapeId = storeShapeWithMetadata(result.shape,
+                                                 "importStepPackage",
+                                                 "content=" + fnv1a64(content) +
+                                                     ";heal=" + (heal ? "1" : "0") +
+                                                     ";sew=" + (sew ? "1" : "0") +
+                                                     ";fixSameParameter=" + (fixSameParameter ? "1" : "0") +
+                                                     ";fixSolid=" + (fixSolid ? "1" : "0") +
+                                                     ";sewingTolerance=" + std::to_string(options.sewingTolerance),
+                                                 {},
+                                                 "generated",
+                                                 result.healed ? "unresolved" : "generated",
+                                                 { result.healed
+                                                     ? "STEP heal/sew/fixup stage changed topology; detailed per-subshape lineage is unresolved"
+                                                     : "STEP import identity is geometry-derived because source semantic stable naming is not available" });
+        
+        ss << ",\"shapeId\":" << shapeId << ",";
+
+        // Let's get the revision info from records
+        auto recordIt = _impl->records.find(shapeId);
+        if (recordIt != _impl->records.end()) {
+            const ShapeRecord& record = recordIt->second;
+            ss << "\"revision\":{";
+            ss << "\"revisionId\":"; appendJsonString(ss, record.revision.revisionId); ss << ",";
+            ss << "\"topologyHash\":"; appendJsonString(ss, record.revision.topologyHash);
+            ss << "},";
+        }
+
+        // Physical properties and BRepCheck as in analyzeShape:
+        ShapeMap solids, shells, wires, faces, edges, vertices;
+        TopExp::MapShapes(result.shape, TopAbs_SOLID, solids);
+        TopExp::MapShapes(result.shape, TopAbs_SHELL, shells);
+        TopExp::MapShapes(result.shape, TopAbs_WIRE, wires);
+        TopExp::MapShapes(result.shape, TopAbs_FACE, faces);
+        TopExp::MapShapes(result.shape, TopAbs_EDGE, edges);
+        TopExp::MapShapes(result.shape, TopAbs_VERTEX, vertices);
+
+        GProp_GProps linearProps;
+        GProp_GProps surfaceProps;
+        GProp_GProps volumeProps;
+        BRepGProp::LinearProperties(result.shape, linearProps, false, false);
+        BRepGProp::SurfaceProperties(result.shape, surfaceProps, false, false);
+        if (solids.Extent() > 0) {
+            BRepGProp::VolumeProperties(result.shape, volumeProps, true, false, false);
+        }
+
+        const auto bounds = boundsOfShape(result.shape);
+        BRepCheck_Analyzer analyzer(result.shape);
+
+        std::string basis = "none";
+        gp_Pnt center(0.0, 0.0, 0.0);
+        bool hasCenter = false;
+        if (solids.Extent() > 0 && std::abs(volumeProps.Mass()) > Precision::Confusion()) {
+            basis = "volume";
+            center = volumeProps.CentreOfMass();
+            hasCenter = true;
+        } else if (faces.Extent() > 0 && std::abs(surfaceProps.Mass()) > Precision::Confusion()) {
+            basis = "surface";
+            center = surfaceProps.CentreOfMass();
+            hasCenter = true;
+        } else if (edges.Extent() > 0 && std::abs(linearProps.Mass()) > Precision::Confusion()) {
+            basis = "linear";
+            center = linearProps.CentreOfMass();
+            hasCenter = true;
+        }
+
+        ss << "\"properties\":{";
+        ss << "\"boundingBox\":{";
+        ss << "\"xMin\":" << bounds[0] << ",";
+        ss << "\"yMin\":" << bounds[1] << ",";
+        ss << "\"zMin\":" << bounds[2] << ",";
+        ss << "\"xMax\":" << bounds[3] << ",";
+        ss << "\"yMax\":" << bounds[4] << ",";
+        ss << "\"zMax\":" << bounds[5] << "},";
+        ss << "\"volume\":" << (solids.Extent() > 0 ? volumeProps.Mass() : 0.0) << ",";
+        ss << "\"surfaceArea\":" << surfaceProps.Mass() << ",";
+        ss << "\"linearLength\":" << linearProps.Mass() << ",";
+        ss << "\"centerOfMass\":";
+        if (hasCenter) {
+            appendPointJson(ss, center);
+        } else {
+            ss << "null";
+        }
+        ss << ",\"centerOfMassBasis\":"; appendJsonString(ss, basis);
+        ss << "},";
+
+        // Topology:
+        ss << "\"topology\":{";
+        ss << "\"solidCount\":" << solids.Extent() << ",";
+        ss << "\"shellCount\":" << shells.Extent() << ",";
+        ss << "\"wireCount\":" << wires.Extent() << ",";
+        ss << "\"faceCount\":" << faces.Extent() << ",";
+        ss << "\"edgeCount\":" << edges.Extent() << ",";
+        ss << "\"vertexCount\":" << vertices.Extent() << ",";
+        ss << "\"isValid\":" << (analyzer.IsValid() ? "true" : "false");
+        ss << "},";
+
+        // Checkpoint:
+        std::string checkpointJson = createCheckpoint(shapeId);
+        ss << "\"checkpoint\":" << checkpointJson << ",";
+
+        // Compute and append the mesh (tessellate):
+        if (linearDeflection > 0 && angularDeflection > 0) {
+            std::string meshJson = tessellate(shapeId, linearDeflection, angularDeflection);
+            ss << "\"mesh\":" << meshJson;
+        } else {
+            ss << "\"mesh\":null";
+        }
+    } else {
+        ss << ",\"shapeId\":null";
+    }
+
+    ss << "}";
+    return ss.str();
+}
+
 std::string OcctKernel::exportStep(uint32_t id) {
     try {
         const TopoDS_Shape& shape = requireShape(id);

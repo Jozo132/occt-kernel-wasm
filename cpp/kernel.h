@@ -198,6 +198,16 @@ public:
                                    bool fixSolid,
                                    double sewingTolerance);
 
+    /// Parse a STEP file and return a fully fused result package as JSON.
+    std::string importStepPackage(const std::string& content,
+                                  bool heal,
+                                  bool sew,
+                                  bool fixSameParameter,
+                                  bool fixSolid,
+                                  double sewingTolerance,
+                                  double linearDeflection,
+                                  double angularDeflection);
+
     /// Write the shape to STEP format and return the file content as a string.
     std::string exportStep(uint32_t id);
 

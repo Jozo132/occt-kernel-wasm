@@ -56,6 +56,8 @@ import type {
     FilletParams,
     ImportStepDetailedResult,
     ImportStepParams,
+    ImportStepPackageParams,
+    ImportStepPackageResult,
     KernelCapabilities,
     KernelVersionInfo,
     HydrateCheckpointParams,
@@ -162,6 +164,16 @@ export interface NativeKernel {
         fixSameParameter: boolean,
         fixSolid: boolean,
         sewingTolerance: number,
+    ): string;
+    importStepPackage?(
+        content: string,
+        heal: boolean,
+        sew: boolean,
+        fixSameParameter: boolean,
+        fixSolid: boolean,
+        sewingTolerance: number,
+        linearDeflection: number,
+        angularDeflection: number,
     ): string;
     exportStep(id: number): string;
     createCheckpoint?: (id: number) => string;
@@ -508,6 +520,78 @@ function toImportStepDetailedResult(raw: RawStepImportDetailedResult, sessionId:
         isValid: raw.isValid,
         wasValidBeforeHealing: raw.wasValidBeforeHealing,
         healed: raw.healed,
+    };
+}
+
+interface RawStepImportPackageResult {
+    readStatus: StepImportReadStatus;
+    transferStatus: StepImportTransferStatus;
+    healed: boolean;
+    isValid: boolean;
+    messageList: RawStepImportMessage[];
+    shapeId?: number;
+    revision?: {
+        revisionId: string;
+        topologyHash: string;
+    };
+    topology?: {
+        solidCount: number;
+        shellCount: number;
+        wireCount: number;
+        faceCount: number;
+        edgeCount: number;
+        vertexCount: number;
+        isValid: boolean;
+    };
+    properties?: {
+        boundingBox: BoundingBox;
+        volume: number;
+        surfaceArea: number;
+        linearLength: number;
+        centerOfMass: Point3 | null;
+        centerOfMassBasis: 'volume' | 'surface' | 'linear' | 'none';
+    };
+    mesh?: RawTessellation;
+    checkpoint?: RevisionCheckpoint;
+}
+
+function toImportStepPackageResult(raw: RawStepImportPackageResult, sessionId: string): ImportStepPackageResult {
+    const mesh = raw.mesh ? {
+        positions: new Float32Array(raw.mesh.positions),
+        normals:   new Float32Array(raw.mesh.normals),
+        indices:   new Uint32Array(raw.mesh.indices),
+        ...(raw.mesh.triangleNormals !== undefined
+            ? { triangleNormals: new Float32Array(raw.mesh.triangleNormals) }
+            : {}),
+        ...(raw.mesh.triangleTopoFaceIds !== undefined
+            ? { triangleTopoFaceIds: new Uint32Array(raw.mesh.triangleTopoFaceIds) }
+            : {}),
+        ...(raw.mesh.triangleFaceGroups !== undefined
+            ? { triangleFaceGroups: new Uint32Array(raw.mesh.triangleFaceGroups) }
+            : {}),
+        ...(raw.mesh.triangleStableHashes !== undefined
+            ? { triangleStableHashes: raw.mesh.triangleStableHashes }
+            : {}),
+        ...(raw.mesh.featureEdges !== undefined
+            ? { featureEdges: raw.mesh.featureEdges }
+            : {}),
+        ...(raw.mesh.rawEdgeSegments !== undefined
+            ? { rawEdgeSegments: new Float32Array(raw.mesh.rawEdgeSegments) }
+            : {}),
+    } : undefined;
+
+    return {
+        readStatus: raw.readStatus,
+        transferStatus: raw.transferStatus,
+        healed: raw.healed,
+        isValid: raw.isValid,
+        messageList: raw.messageList,
+        ...(raw.shapeId !== undefined && raw.shapeId !== null ? { shape: makeHandle(raw.shapeId, sessionId) } : {}),
+        ...(raw.revision ? { revision: raw.revision } : {}),
+        ...(raw.topology ? { topology: raw.topology } : {}),
+        ...(raw.properties ? { properties: raw.properties } : {}),
+        ...(mesh ? { mesh } : {}),
+        ...(raw.checkpoint ? { checkpoint: raw.checkpoint } : {}),
     };
 }
 
@@ -1785,6 +1869,36 @@ export class OcctKernel {
         ));
 
         return toImportStepDetailedResult(parseJson<RawStepImportDetailedResult>(raw, 'STEP import'), this._sessionId);
+    }
+
+    /**
+     * Import a STEP file and return a fully fused result package.
+     */
+    importStepPackage(params: ImportStepPackageParams): ImportStepPackageResult {
+        if (typeof params.content !== 'string') {
+            throw new KernelError('INVALID_PARAMS', 'STEP content must be a string');
+        }
+
+        if (typeof this._native.importStepPackage !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support importStepPackage');
+        }
+
+        const options = normalizeImportOptions(params.options);
+        const linearDeflection = params.options?.linearDeflection ?? 0.1;
+        const angularDeflection = params.options?.angularDeflection ?? 0.5;
+
+        const raw = wrap(() => this._native.importStepPackage!(
+            params.content,
+            options.heal,
+            options.sew,
+            options.fixSameParameter,
+            options.fixSolid,
+            options.sewingTolerance,
+            linearDeflection,
+            angularDeflection,
+        ));
+
+        return toImportStepPackageResult(parseJson<RawStepImportPackageResult>(raw, 'STEP package import'), this._sessionId);
     }
 
     /**

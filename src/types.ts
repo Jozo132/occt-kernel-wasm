@@ -1205,6 +1205,50 @@ export interface ImportStepParams {
     readonly options?: StepImportOptions;
 }
 
+export interface StepImportPackageOptions extends StepImportOptions {
+    readonly linearDeflection?: number;
+    readonly angularDeflection?: number;
+}
+
+export interface ImportStepPackageParams {
+    /** Raw content of a STEP file as a UTF-8 string. */
+    readonly content: string;
+    /** Optional post-processing and tessellation controls. */
+    readonly options?: StepImportPackageOptions;
+}
+
+export interface ImportStepPackageResult {
+    readonly readStatus: StepImportReadStatus;
+    readonly transferStatus: StepImportTransferStatus;
+    readonly healed: boolean;
+    readonly isValid: boolean;
+    readonly messageList: readonly StepImportMessage[];
+    readonly shape?: ShapeHandle;
+    readonly revision?: {
+        readonly revisionId: string;
+        readonly topologyHash: string;
+    };
+    readonly topology?: {
+        readonly solidCount: number;
+        readonly shellCount: number;
+        readonly wireCount: number;
+        readonly faceCount: number;
+        readonly edgeCount: number;
+        readonly vertexCount: number;
+        readonly isValid: boolean;
+    };
+    readonly properties?: {
+        readonly boundingBox: BoundingBox;
+        readonly volume: number;
+        readonly surfaceArea: number;
+        readonly linearLength: number;
+        readonly centerOfMass: Point3 | null;
+        readonly centerOfMassBasis: 'volume' | 'surface' | 'linear' | 'none';
+    };
+    readonly mesh?: TessellationResult;
+    readonly checkpoint?: RevisionCheckpoint;
+}
+
 export interface ExportStepParams {
     readonly shape: ShapeHandle;
 }

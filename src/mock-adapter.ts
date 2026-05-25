@@ -2047,6 +2047,66 @@ export class MockNativeKernel {
         } satisfies MockImportResult);
     }
 
+    importStepPackage(
+        content: string,
+        heal: boolean,
+        sew: boolean,
+        fixSameParameter: boolean,
+        fixSolid: boolean,
+        sewingTolerance: number,
+        linearDeflection: number,
+        angularDeflection: number,
+    ): string {
+        const detailedJson = this.importStepDetailed(content, heal, sew, fixSameParameter, fixSolid, sewingTolerance);
+        const detailed = JSON.parse(detailedJson);
+
+        if (detailed.shapeId !== undefined) {
+            const shapeId = detailed.shapeId;
+            const revision = this._revisionInfo(shapeId);
+            const properties = JSON.parse(this.analyzeShape(shapeId));
+            const checkpoint = JSON.parse(this.createCheckpoint(shapeId));
+            const mesh = (linearDeflection > 0 && angularDeflection > 0)
+                ? JSON.parse(this.tessellate(shapeId, linearDeflection, angularDeflection))
+                : null;
+
+            const topology = {
+                solidCount: properties.solidCount ?? 0,
+                shellCount: properties.shellCount ?? 0,
+                wireCount: properties.wireCount ?? 0,
+                faceCount: properties.faceCount ?? 0,
+                edgeCount: properties.edgeCount ?? 0,
+                vertexCount: properties.vertexCount ?? 0,
+                isValid: properties.isValid ?? false,
+            };
+
+            return JSON.stringify({
+                readStatus: detailed.readStatus,
+                transferStatus: detailed.transferStatus,
+                healed: detailed.healed,
+                isValid: detailed.isValid,
+                messageList: detailed.messageList,
+                shapeId,
+                revision: {
+                    revisionId: revision.revisionId,
+                    topologyHash: revision.topologyHash,
+                },
+                topology,
+                properties,
+                checkpoint,
+                mesh,
+            });
+        }
+
+        return JSON.stringify({
+            readStatus: detailed.readStatus,
+            transferStatus: detailed.transferStatus,
+            healed: detailed.healed,
+            isValid: detailed.isValid,
+            messageList: detailed.messageList,
+            shapeId: null,
+        });
+    }
+
     exportStep(id: number): string {
         this._require(id);
         return [
