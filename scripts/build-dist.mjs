@@ -1,6 +1,6 @@
 import { build } from 'esbuild';
 import { execFile } from 'node:child_process';
-import { readdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -30,6 +30,7 @@ function printElapsedTime() {
 }
 
 async function cleanDistArtifacts() {
+    await mkdir(distDir, { recursive: true });
     const entries = await readdir(distDir, { withFileTypes: true });
     const keepFiles = new Set(['occt-kernel.js', 'occt-kernel.wasm']);
 

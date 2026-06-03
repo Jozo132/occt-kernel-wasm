@@ -23,6 +23,7 @@ jobs:
       contents: read
 
     strategy:
+      fail-fast: false
       matrix:
         node-version: [18.x, 20.x]
 
@@ -90,6 +91,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      OCCT_WASM_CACHE_ROOT: ${{ github.workspace }}/.ci-cache/occt-kernel-wasm
     # Only attempt the WASM build on pushes to main/master, not every PR,
     # to avoid consuming large amounts of CI time before OCCT is cached.
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
@@ -116,8 +119,8 @@ jobs:
         id: cache-occt-wasm
         uses: actions/cache@v4
         with:
-          path: third-party/occt-wasm
-          key: occt-wasm-7.8.1-emsdk-3.1.59-${{ runner.os }}
+          path: ${{ env.OCCT_WASM_CACHE_ROOT }}
+          key: occt-wasm-V8_0_0-emsdk-3.1.59-${{ runner.os }}
 
       - name: Build OCCT for WASM
         if: steps.cache-occt-wasm.outputs.cache-hit != 'true'
