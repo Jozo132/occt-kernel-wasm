@@ -44,6 +44,8 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         .function("chamferEdges", &OcctKernel::chamferEdges)
         .function("filletEdgesWithSpec", &OcctKernel::filletEdgesWithSpec)
         .function("chamferEdgesWithSpec", &OcctKernel::chamferEdgesWithSpec)
+        .function("getLastError", &OcctKernel::getLastError)
+        .function("clearLastError", &OcctKernel::clearLastError)
         .function("transformShape", &OcctKernel::transformShape)
 
         // Queries
@@ -67,6 +69,7 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
 
         // Tessellation
         .function("tessellate", &OcctKernel::tessellate)
+        .function("tessellateWithOptions", &OcctKernel::tessellateWithOptions)
 
         // Import / export
         .function("importStep", &OcctKernel::importStep)

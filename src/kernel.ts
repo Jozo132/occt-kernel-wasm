@@ -52,6 +52,8 @@ import type {
     FaceEvaluationResult,
     FaceRef,
     FeatureEdgeChain,
+    FeaturePreviewParams,
+    FeaturePreviewResult,
     FilletFeatureParams,
     FilletParams,
     ImportStepDetailedResult,
@@ -137,6 +139,8 @@ export interface NativeKernel {
     chamferEdges(id: number, distance: number): number;
     filletEdgesWithSpec?: (id: number, specJson: string) => string;
     chamferEdgesWithSpec?: (id: number, specJson: string) => string;
+    getLastError?: () => string;
+    clearLastError?: () => void;
     transformShape(id: number, transformJson: string): number;
     getTopology(id: number): string;
     getRevisionInfo?: (id: number) => string;
@@ -156,6 +160,7 @@ export interface NativeKernel {
     measureShapeDistance?: (id1: number, id2: number, tolerance: number) => string;
     checkValidity(id: number): boolean;
     tessellate(id: number, linearDeflection: number, angularDeflection: number): string;
+    tessellateWithOptions?: (id: number, linearDeflection: number, angularDeflection: number, optionsJson: string) => string;
     importStep(content: string): number;
     importStepDetailed(
         content: string,
@@ -202,6 +207,9 @@ function createSessionId(): string {
 }
 
 function makeHandle(id: number, sessionId: string): ShapeHandle {
+    if (!Number.isInteger(id) || id <= 0) {
+        throw new KernelError('OPERATION_FAILED', `Native operation returned an invalid shape handle: ${String(id)}`);
+    }
     return Object.freeze({ id, sessionId });
 }
 
@@ -222,10 +230,23 @@ function resolveShapeId(shape: ShapeHandle, sessionId: string, name: string): nu
  * Wrap a native call, converting any thrown value (native C++ exception
  * or KernelError from the mock) to a {@link KernelError}.
  */
-function wrap<T>(fn: () => T): T {
+function isOpaqueNativeException(value: unknown): boolean {
+    return typeof value === 'number'
+        || typeof value === 'bigint'
+        || (typeof value === 'string' && /^\d+$/.test(value));
+}
+
+function wrap<T>(fn: () => T, native?: NativeKernel): T {
+    native?.clearLastError?.();
     try {
         return fn();
     } catch (err) {
+        if (isOpaqueNativeException(err)) {
+            const lastError = native?.getLastError?.();
+            if (typeof lastError === 'string' && lastError.length > 0) {
+                throw parseNativeError(lastError);
+            }
+        }
         throw parseNativeError(err);
     }
 }
@@ -335,7 +356,10 @@ function requireFaceRef(value: FaceRef, name: string): void {
     requireEdgeRef(value, name);
 }
 
-function withShapeHandle(result: Omit<BlendOperationResult, 'shape'>, sessionId: string): BlendOperationResult {
+function withShapeHandle(result: Omit<BlendOperationResult, 'shape'>, sessionId: string, context: string): BlendOperationResult {
+    if (typeof result !== 'object' || result === null || !Number.isInteger(result.shapeId) || result.shapeId <= 0) {
+        throw new KernelError('OPERATION_FAILED', `${context} did not include a valid shapeId`);
+    }
     return {
         ...result,
         shape: makeHandle(result.shapeId, sessionId),
@@ -403,6 +427,17 @@ interface RawTessellation {
     rawEdgeSegments?: number[];
 }
 
+interface TessellationNativeOptions {
+    includeMetadata?: boolean;
+    includeTriangleNormals?: boolean;
+    includeTriangleTopoFaceIds?: boolean;
+    includeTriangleFaceGroups?: boolean;
+    includeTriangleStableHashes?: boolean;
+    includeFeatureEdges?: boolean;
+    includeRawEdgeSegments?: boolean;
+    faces?: readonly FaceRef[];
+}
+
 interface RawTopology {
     revisionId?: string;
     operationId?: string | null;
@@ -443,6 +478,8 @@ interface RawShapeIntersectionResult {
 const fallbackCapabilities: KernelCapabilities = {
     featureEdgesV1: false,
     rawEdgeSegmentsV1: false,
+    featurePreviewV1: true,
+    tessellationOptionsV1: false,
     triangleNormalsV1: false,
     triangleFaceMappingV1: false,
     topologySubshapesV1: false,
@@ -1409,7 +1446,7 @@ export class OcctKernel {
         }
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
         const specJson = JSON.stringify(normalizeExtrudeProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
-        return this.makeHandle(wrap(() => this._native.extrudeProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
+        return this.makeHandle(wrap(() => this._native.extrudeProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0, this._native));
     }
 
     /** Apply a versioned subtractive profile extrusion feature spec to a resident shape. */
@@ -1419,7 +1456,7 @@ export class OcctKernel {
         }
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
         const specJson = JSON.stringify(normalizeExtrudeProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
-        return this.makeHandle(wrap(() => this._native.extrudeCutProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
+        return this.makeHandle(wrap(() => this._native.extrudeCutProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0, this._native));
     }
 
     /**
@@ -1439,7 +1476,7 @@ export class OcctKernel {
             }
             const profileJson = JSON.stringify(normalizeProfile(params.profile));
             const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
-            return this.makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
+            return this.makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0, this._native));
         }
 
         if (typeof this._native.revolveProfileWithSpec !== 'function') {
@@ -1447,7 +1484,7 @@ export class OcctKernel {
         }
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
         const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
-        return this.makeHandle(wrap(() => this._native.revolveProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
+        return this.makeHandle(wrap(() => this._native.revolveProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0, this._native));
     }
 
     /** Apply a versioned subtractive profile revolve feature spec to a resident shape. */
@@ -1457,7 +1494,7 @@ export class OcctKernel {
         }
         const profileJson = JSON.stringify(normalizeProfile(params.profile));
         const specJson = JSON.stringify(normalizeRevolveProfileSpec(params.spec, (shape, name) => this.shapeId(shape, name)));
-        return this.makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
+        return this.makeHandle(wrap(() => this._native.revolveCutProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0, this._native));
     }
 
     /** Apply a versioned sweep feature spec to a resident shape. */
@@ -1467,7 +1504,7 @@ export class OcctKernel {
         }
         const profileJson = JSON.stringify(requireSingleWireProfile(normalizeProfile(params.profile), 'profile'));
         const specJson = JSON.stringify(normalizeSweepProfileSpec(params.spec, params.cut === true));
-        return this.makeHandle(wrap(() => this._native.sweepProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0));
+        return this.makeHandle(wrap(() => this._native.sweepProfileWithSpec?.(this.shapeId(params.shape), profileJson, specJson) ?? 0, this._native));
     }
 
     /** Apply a versioned loft feature spec to a resident shape. */
@@ -1477,7 +1514,7 @@ export class OcctKernel {
         }
         const sectionsJson = JSON.stringify(normalizeLoftSections(params.sections));
         const specJson = JSON.stringify(normalizeLoftSpec(params.spec, params.cut === true));
-        return this.makeHandle(wrap(() => this._native.loftWithSpec?.(this.shapeId(params.shape), sectionsJson, specJson) ?? 0));
+        return this.makeHandle(wrap(() => this._native.loftWithSpec?.(this.shapeId(params.shape), sectionsJson, specJson) ?? 0, this._native));
     }
 
     // -----------------------------------------------------------------------
@@ -1535,8 +1572,8 @@ export class OcctKernel {
                 requireSupportedBlendControls('filletEdges', `fillet.edges[${index}]`, entry);
             });
         }
-        const raw = wrap(() => this._native.filletEdgesWithSpec?.(this.shapeId(params.shape), JSON.stringify(params.spec)) ?? '{}');
-        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'fillet result'), this._sessionId);
+        const raw = wrap(() => this._native.filletEdgesWithSpec?.(this.shapeId(params.shape), JSON.stringify(params.spec)) ?? '{}', this._native);
+        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'fillet result'), this._sessionId, 'fillet result');
     }
 
     /** Apply a versioned native OCCT chamfer spec and return exact blend lineage. */
@@ -1559,8 +1596,112 @@ export class OcctKernel {
                 }
             });
         }
-        const raw = wrap(() => this._native.chamferEdgesWithSpec?.(this.shapeId(params.shape), JSON.stringify(params.spec)) ?? '{}');
-        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'chamfer result'), this._sessionId);
+        const raw = wrap(() => this._native.chamferEdgesWithSpec?.(this.shapeId(params.shape), JSON.stringify(params.spec)) ?? '{}', this._native);
+        return withShapeHandle(parseJson<Omit<BlendOperationResult, 'shape'>>(raw, 'chamfer result'), this._sessionId, 'chamfer result');
+    }
+
+    /**
+     * Evaluate an exact feature as a temporary live preview.
+     *
+     * The source model is not mutated. By default the exact preview result is
+     * tessellated with lightweight metadata and then released immediately.
+     */
+    previewFeature(params: FeaturePreviewParams): FeaturePreviewResult {
+        const execution = this.executePreviewFeature(params);
+        let shouldDisposePreview = true;
+
+        try {
+            const includeMesh = params.includeMesh !== false;
+            const includeWireframe = params.includeWireframe === true;
+            const needsTessellation = includeMesh || includeWireframe;
+            const meshForPreview = needsTessellation
+                ? this.tessellate({
+                    shape: execution.shape,
+                    includeMetadata: false,
+                    ...params.tessellation,
+                    ...(includeWireframe ? { includeFeatureEdges: true } : {}),
+                })
+                : undefined;
+
+            const result: FeaturePreviewResult = {
+                operation: params.operation,
+                ...(includeMesh && meshForPreview !== undefined ? { mesh: meshForPreview } : {}),
+                ...(includeWireframe ? { wireframe: meshForPreview?.featureEdges ?? [] } : {}),
+                ...(params.includeTopology === true ? { topology: execution.topology ?? this.getTopology(execution.shape) } : {}),
+                ...(execution.revision !== undefined ? { revision: execution.revision } : {}),
+                ...(execution.lineage !== undefined ? { lineage: execution.lineage } : {}),
+                ...(execution.blendFaces !== undefined ? { blendFaces: execution.blendFaces } : {}),
+                ...(execution.status !== undefined ? { status: execution.status } : {}),
+                ...(params.retainPreviewShape === true ? { previewShape: execution.shape } : {}),
+            };
+
+            if (params.retainPreviewShape === true) {
+                shouldDisposePreview = false;
+            }
+            return result;
+        } finally {
+            if (shouldDisposePreview) {
+                try {
+                    this.disposeShape({ shape: execution.shape });
+                } catch {
+                    // Preserve the original preview error if extraction failed.
+                }
+            }
+        }
+    }
+
+    private executePreviewFeature(params: FeaturePreviewParams): {
+        shape: ShapeHandle;
+        revision?: RevisionInfo;
+        topology?: TopologyResult;
+        lineage?: BlendOperationResult['lineage'];
+        blendFaces?: BlendOperationResult['blendFaces'];
+        status?: BlendOperationResult['status'];
+    } {
+        switch (params.operation) {
+            case 'extrudeProfile':
+                return { shape: this.extrudeProfileWithSpec(params.params) };
+            case 'extrudeCutProfile':
+                return { shape: this.extrudeCutProfileWithSpec(params.params) };
+            case 'revolveProfile':
+                return { shape: this.revolveProfileWithSpec(params.params) };
+            case 'revolveCutProfile':
+                return { shape: this.revolveCutProfileWithSpec(params.params) };
+            case 'sweepProfile':
+                return { shape: this.sweepProfileWithSpec(params.params) };
+            case 'loft':
+                return { shape: this.loftWithSpec(params.params) };
+            case 'filletEdges': {
+                const result = this.filletEdgesWithSpec(params.params);
+                return {
+                    shape: result.shape,
+                    revision: result.revision,
+                    topology: result.topology,
+                    lineage: result.lineage,
+                    blendFaces: result.blendFaces,
+                    status: result.status,
+                };
+            }
+            case 'chamferEdges': {
+                const result = this.chamferEdgesWithSpec(params.params);
+                return {
+                    shape: result.shape,
+                    revision: result.revision,
+                    topology: result.topology,
+                    lineage: result.lineage,
+                    blendFaces: result.blendFaces,
+                    status: result.status,
+                };
+            }
+            case 'transformShape':
+                return { shape: this.transformShape(params.params) };
+            case 'booleanUnion':
+                return { shape: this.booleanUnion(params.params) };
+            case 'booleanSubtract':
+                return { shape: this.booleanSubtract(params.params) };
+            case 'booleanIntersect':
+                return { shape: this.booleanIntersect(params.params) };
+        }
     }
 
     /**
@@ -1799,7 +1940,24 @@ export class OcctKernel {
         requirePositive(linearDeflection, 'linearDeflection');
         requirePositive(angularDeflection, 'angularDeflection');
 
-        const raw = wrap(() => this._native.tessellate(this.shapeId(params.shape), linearDeflection, angularDeflection));
+        const options: TessellationNativeOptions = {
+            ...(params.includeMetadata !== undefined ? { includeMetadata: params.includeMetadata } : {}),
+            ...(params.includeTriangleNormals !== undefined ? { includeTriangleNormals: params.includeTriangleNormals } : {}),
+            ...(params.includeTriangleTopoFaceIds !== undefined ? { includeTriangleTopoFaceIds: params.includeTriangleTopoFaceIds } : {}),
+            ...(params.includeTriangleFaceGroups !== undefined ? { includeTriangleFaceGroups: params.includeTriangleFaceGroups } : {}),
+            ...(params.includeTriangleStableHashes !== undefined ? { includeTriangleStableHashes: params.includeTriangleStableHashes } : {}),
+            ...(params.includeFeatureEdges !== undefined ? { includeFeatureEdges: params.includeFeatureEdges } : {}),
+            ...(params.includeRawEdgeSegments !== undefined ? { includeRawEdgeSegments: params.includeRawEdgeSegments } : {}),
+            ...(params.faces !== undefined ? { faces: params.faces } : {}),
+        };
+        params.faces?.forEach((face, index) => requireFaceRef(face, `faces[${index}]`));
+        const hasOptions = Object.keys(options).length > 0;
+        if (hasOptions && typeof this._native.tessellateWithOptions !== 'function') {
+            throw new KernelError('OPERATION_FAILED', 'This native kernel does not support tessellation options');
+        }
+        const raw = wrap(() => hasOptions && typeof this._native.tessellateWithOptions === 'function'
+            ? this._native.tessellateWithOptions(this.shapeId(params.shape), linearDeflection, angularDeflection, JSON.stringify(options))
+            : this._native.tessellate(this.shapeId(params.shape), linearDeflection, angularDeflection));
         const data = parseJson<RawTessellation>(raw, 'tessellation');
 
         return {

@@ -111,6 +111,12 @@ public:
     /// Apply a versioned structured chamfer spec and return blend lineage JSON.
     std::string chamferEdgesWithSpec(uint32_t id, const std::string& specJson);
 
+    /// Return the last structured native error emitted before a thrown exception.
+    std::string getLastError() const;
+
+    /// Clear the last structured native error diagnostic.
+    void clearLastError();
+
     /// Apply a world-space transform to an existing resident shape.
     uint32_t transformShape(uint32_t id, const std::string& transformJson);
 
@@ -182,6 +188,7 @@ public:
         *   positions[], normals[], indices[], triangle metadata, featureEdges[], rawEdgeSegments[]
      */
     std::string tessellate(uint32_t id, double linearDeflection, double angularDeflection);
+    std::string tessellateWithOptions(uint32_t id, double linearDeflection, double angularDeflection, const std::string& optionsJson);
 
     // -----------------------------------------------------------------------
     // Import / export

@@ -134,7 +134,7 @@ Releases are tagged `vMAJOR.MINOR.PATCH`. After merging to `main`:
 
 1. Update `version` in `package.json`.
 2. Add a changelog entry.
-3. Push a version tag: `git tag v1.0.0 && git push origin v1.0.0`.
+3. Push a version tag: `git tag v1.1.0 && git push origin v1.1.0`.
 4. The GitHub Actions CI will publish to npm automatically.
 
 ---

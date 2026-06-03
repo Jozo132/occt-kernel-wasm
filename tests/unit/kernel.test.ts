@@ -25,6 +25,10 @@ function makeKernel(): OcctKernel {
     return new OcctKernel(makeMockModule());
 }
 
+function makeKernelWithNative(nativeCtor: new () => InstanceType<typeof MockNativeKernel>): OcctKernel {
+    return new OcctKernel({ OcctKernel: nativeCtor } as unknown as WasmModule);
+}
+
 function invalidHandle(handle: ShapeHandle, id = 9999): ShapeHandle {
     return { ...handle, id };
 }
@@ -503,6 +507,76 @@ describe('structured blend operations', () => {
         expectBlendFacesResolveToFinalTopology(result.blendFaces, k.getTopology(result.shape).faces);
     });
 
+    it('rejects empty native blend results instead of returning an invalid shape handle', () => {
+        class EmptyBlendNativeKernel extends MockNativeKernel {
+            filletEdgesWithSpec(): string {
+                return '{}';
+            }
+
+            chamferEdgesWithSpec(): string {
+                return '{}';
+            }
+        }
+
+        const k = makeKernelWithNative(EmptyBlendNativeKernel);
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        for (const run of [
+            () => k.filletEdgesWithSpec({ shape: box, spec: { schemaVersion: 1, edges: [{ topoId: 1, radius: 1 }] } }),
+            () => k.chamferEdgesWithSpec({ shape: box, spec: { schemaVersion: 1, edges: [{ topoId: 1, distance: 1 }] } }),
+        ]) {
+            try {
+                run();
+                fail('should have thrown');
+            } catch (err) {
+                expect(err).toBeInstanceOf(KernelError);
+                expect((err as KernelError).code).toBe('OPERATION_FAILED');
+                expect((err as KernelError).detail).toContain('valid shapeId');
+            }
+        }
+    });
+
+    it('decodes opaque native numeric exceptions through the native last-error bridge', () => {
+        class OpaqueChamferFailureNativeKernel extends MockNativeKernel {
+            private lastError = '';
+
+            clearLastError(): void {
+                this.lastError = '';
+            }
+
+            getLastError(): string {
+                return this.lastError;
+            }
+
+            chamferEdgesWithSpec(): string {
+                this.lastError = JSON.stringify({
+                    code: 'OPERATION_FAILED',
+                    detail: JSON.stringify({
+                        operation: 'chamferEdges',
+                        message: 'BRepFilletAPI_MakeChamfer failed',
+                        requestedEdgeRefs: [{ topoId: 1, stableHash: 'E:test' }],
+                    }),
+                });
+                throw 15690360;
+            }
+        }
+
+        const k = makeKernelWithNative(OpaqueChamferFailureNativeKernel);
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        try {
+            k.chamferEdgesWithSpec({ shape: box, spec: { schemaVersion: 1, edges: [{ topoId: 1, distance: 1 }] } });
+            fail('should have thrown');
+        } catch (err) {
+            expect(err).toBeInstanceOf(KernelError);
+            expect((err as KernelError).code).toBe('OPERATION_FAILED');
+            expect(JSON.parse((err as KernelError).detail)).toMatchObject({
+                operation: 'chamferEdges',
+                message: 'BRepFilletAPI_MakeChamfer failed',
+            });
+        }
+    });
+
     it('throws a structured unsupported error for partial-edge fillets', () => {
         const k = makeKernel();
         const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
@@ -524,6 +598,65 @@ describe('structured blend operations', () => {
                 unsupportedFeature: 'fillet.partialEdge',
             });
         }
+    });
+});
+
+describe('feature preview', () => {
+    it('returns a lightweight mesh and blend lineage without applying the feature to the source', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const preview = k.previewFeature({
+            operation: 'filletEdges',
+            params: {
+                shape: box,
+                spec: { schemaVersion: 1, edges: [{ topoId: 1, radius: 1 }] },
+            },
+            includeWireframe: true,
+        });
+
+        expect(preview.operation).toBe('filletEdges');
+        expect(preview.mesh?.positions).toBeInstanceOf(Float32Array);
+        expect(preview.mesh?.triangleStableHashes).toBeUndefined();
+        expect(preview.wireframe?.length).toBeGreaterThan(0);
+        expect(preview.blendFaces?.[0]).toMatchObject({ kind: 'filletFace' });
+        expect(preview.previewShape).toBeUndefined();
+        expect(k.checkValidity(box)).toBe(true);
+    });
+
+    it('can retain the temporary preview shape for explicit caller inspection', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const preview = k.previewFeature({
+            operation: 'transformShape',
+            params: { shape: box, transform: { translation: [1, 0, 0] } },
+            retainPreviewShape: true,
+            includeTopology: true,
+        });
+
+        expect(preview.previewShape?.id).toBeGreaterThan(0);
+        expect(preview.previewShape?.id).not.toBe(box.id);
+        expect(preview.topology?.faceCount).toBeGreaterThan(0);
+        expect(k.checkValidity(preview.previewShape!)).toBe(true);
+
+        k.disposeShape({ shape: preview.previewShape! });
+    });
+
+    it('can return wireframe-only feedback for realtime editing loops', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const preview = k.previewFeature({
+            operation: 'chamferEdges',
+            params: {
+                shape: box,
+                spec: { schemaVersion: 1, edges: [{ topoId: 1, distance: 0.5 }] },
+            },
+            includeMesh: false,
+            includeWireframe: true,
+        });
+
+        expect(preview.mesh).toBeUndefined();
+        expect(preview.wireframe?.length).toBeGreaterThan(0);
+        expect(preview.status?.isExact).toBe(true);
     });
 });
 
@@ -923,6 +1056,8 @@ describe('getCapabilities', () => {
 
         expect(capabilities.featureEdgesV1).toBe(true);
         expect(capabilities.rawEdgeSegmentsV1).toBe(true);
+        expect(capabilities.featurePreviewV1).toBe(true);
+        expect(capabilities.tessellationOptionsV1).toBe(true);
         expect(capabilities.triangleNormalsV1).toBe(true);
         expect(capabilities.topologySubshapesV1).toBe(true);
         expect(capabilities.topologyHierarchyV1).toBe(true);
@@ -983,7 +1118,7 @@ describe('getVersionInfo', () => {
         const k = makeKernel();
         const info = k.getVersionInfo();
 
-        expect(info.libraryVersion).toBe('1.0.0');
+        expect(info.libraryVersion).toBe('1.1.0');
         expect(info.apiVersion).toBe(1);
         expect(info.kernelVersion).toBe('8.0.0');
         expect(info.sessionId).toMatch(/^session_/);
@@ -1191,6 +1326,64 @@ describe('tessellate', () => {
         expect(mesh.featureEdges?.[0]?.points.length).toBeGreaterThan(1);
         expect(mesh.rawEdgeSegments).toBeInstanceOf(Float32Array);
         expect((mesh as unknown as Record<string, unknown>).edgeSegments).toBeUndefined();
+    });
+
+    it('can omit tessellation metadata for lightweight previews', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const mesh = k.tessellate({ shape: box, includeMetadata: false });
+
+        expect(mesh.positions.length).toBeGreaterThan(0);
+        expect(mesh.normals.length).toBe(mesh.positions.length);
+        expect(mesh.indices.length % 3).toBe(0);
+        expect(mesh.triangleNormals).toBeUndefined();
+        expect(mesh.triangleTopoFaceIds).toBeUndefined();
+        expect(mesh.triangleFaceGroups).toBeUndefined();
+        expect(mesh.triangleStableHashes).toBeUndefined();
+        expect(mesh.featureEdges).toBeUndefined();
+        expect(mesh.rawEdgeSegments).toBeUndefined();
+    });
+
+    it('can selectively include tessellation metadata channels', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const mesh = k.tessellate({
+            shape: box,
+            includeMetadata: false,
+            includeTriangleTopoFaceIds: true,
+            includeFeatureEdges: true,
+        });
+
+        expect(mesh.triangleTopoFaceIds).toBeInstanceOf(Uint32Array);
+        expect(mesh.featureEdges?.length).toBeGreaterThan(0);
+        expect(mesh.triangleStableHashes).toBeUndefined();
+        expect(mesh.rawEdgeSegments).toBeUndefined();
+    });
+
+    it('accepts face subsets for partial tessellation', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+        const mesh = k.tessellate({
+            shape: box,
+            faces: [{ topoId: 4 }],
+            includeMetadata: false,
+            includeTriangleTopoFaceIds: true,
+        });
+
+        expect(mesh.positions.length).toBeGreaterThan(0);
+        expect(Array.from(mesh.triangleTopoFaceIds ?? [])).toEqual([4]);
+        expect(mesh.featureEdges).toBeUndefined();
+    });
+
+    it('does not silently ignore tessellation options on legacy native modules', () => {
+        class LegacyTessellationNativeKernel extends MockNativeKernel {
+            tessellateWithOptions = undefined as unknown as MockNativeKernel['tessellateWithOptions'];
+        }
+
+        const k = makeKernelWithNative(LegacyTessellationNativeKernel);
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        expect(() => k.tessellate({ shape: box, includeMetadata: false })).toThrow(KernelError);
     });
 
     it('applies default deflection values', () => {

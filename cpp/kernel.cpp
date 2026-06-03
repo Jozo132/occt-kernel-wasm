@@ -164,8 +164,11 @@ static std::string makeErrorJson(const std::string& code, const std::string& det
     return "{\"code\":\"" + escape(code) + "\",\"detail\":\"" + escape(detail) + "\"}";
 }
 
+static std::string g_lastKernelErrorJson;
+
 static void throwKernelError(const std::string& code, const std::string& detail) {
-    throw std::runtime_error(makeErrorJson(code, detail));
+    g_lastKernelErrorJson = makeErrorJson(code, detail);
+    throw std::runtime_error(g_lastKernelErrorJson);
 }
 
 static bool looksLikeKernelErrorJson(const std::string& text) {
@@ -1957,6 +1960,24 @@ void appendEntityRefJson(std::ostringstream& out, const ResolvedFaceRef& face) {
     out << "}";
 }
 
+void appendEdgeRefArrayJson(std::ostringstream& out, const std::vector<ResolvedEdgeRef>& edges) {
+    out << '[';
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (i > 0) out << ',';
+        appendEntityRefJson(out, edges[i]);
+    }
+    out << ']';
+}
+
+void appendFaceRefArrayJson(std::ostringstream& out, const std::vector<ResolvedFaceRef>& faces) {
+    out << '[';
+    for (std::size_t i = 0; i < faces.size(); ++i) {
+        if (i > 0) out << ',';
+        appendEntityRefJson(out, faces[i]);
+    }
+    out << ']';
+}
+
 void appendSupportRefJson(std::ostringstream& out,
                           const ShapeRecord& record,
                           const TopoDS_Shape& support,
@@ -2120,6 +2141,165 @@ std::vector<int> supportFaceIdsForEdge(const TopoDS_Shape& shape, const TopoDS_E
     ShapeToShapeListMap edgeToFaces;
     TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
     return faceIdsForEdge(edge, faceMap, edgeToFaces);
+}
+
+bool faceContainsEdge(const TopoDS_Face& face, const TopoDS_Edge& edge) {
+    for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next()) {
+        if (ex.Current().IsSame(edge)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+ResolvedFaceRef resolvedFaceByTopoId(const TopoDS_Shape& shape,
+                                     const RevisionMetadata* revision,
+                                     int topoId) {
+    ShapeMap faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    const std::vector<std::string> hashes = faceStableHashesForShape(shape, revision);
+    if (topoId < 1 || topoId > faces.Extent()) {
+        return ResolvedFaceRef();
+    }
+    return { TopoDS::Face(faces(topoId)), topoId, hashes[static_cast<std::size_t>(topoId)] };
+}
+
+bool isSplineLikeEdge(const TopoDS_Edge& edge) {
+    try {
+        BRepAdaptor_Curve curve(edge);
+        const GeomAbs_CurveType type = curve.GetType();
+        return type == GeomAbs_BSplineCurve || type == GeomAbs_BezierCurve || type == GeomAbs_OtherCurve;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+bool isPlanarFace(const TopoDS_Face& face) {
+    try {
+        return BRepAdaptor_Surface(face, false).GetType() == GeomAbs_Plane;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+ResolvedFaceRef selectSymmetricChamferBuilderFace(const TopoDS_Shape& shape,
+                                                  const RevisionMetadata* revision,
+                                                  const ResolvedEdgeRef& edge,
+                                                  const ResolvedFaceRef& requestedFace) {
+    if (!isSplineLikeEdge(edge.edge)) {
+        return requestedFace;
+    }
+    for (int faceId : supportFaceIdsForEdge(shape, edge.edge)) {
+        ResolvedFaceRef candidate = resolvedFaceByTopoId(shape, revision, faceId);
+        if (!candidate.face.IsNull() && !isPlanarFace(candidate.face)) {
+            return candidate;
+        }
+    }
+    return requestedFace;
+}
+
+void throwReferenceFaceValidationError(const std::string& operation,
+                                       const std::string& path,
+                                       const TopoDS_Shape& shape,
+                                       const ResolvedEdgeRef& edge,
+                                       const ResolvedFaceRef& face) {
+    std::ostringstream detail;
+    detail << "{";
+    detail << "\"phase\":\"validation\",";
+    detail << "\"operation\":"; appendJsonString(detail, operation); detail << ",";
+    detail << "\"path\":"; appendJsonString(detail, path); detail << ",";
+    detail << "\"reason\":\"referenceFace must be one of the selected edge's adjacent faces\",";
+    detail << "\"edge\":"; appendEntityRefJson(detail, edge); detail << ",";
+    detail << "\"referenceFace\":"; appendEntityRefJson(detail, face); detail << ",";
+    detail << "\"adjacentFaceIds\":"; appendIntArrayJson(detail, supportFaceIdsForEdge(shape, edge.edge));
+    detail << "}";
+    throwKernelError("INVALID_PARAMS", detail.str());
+}
+
+void requireReferenceFaceAdjacentToEdge(const TopoDS_Shape& shape,
+                                        const ResolvedEdgeRef& edge,
+                                        const ResolvedFaceRef& face,
+                                        const std::string& operation,
+                                        const std::string& path) {
+    if (!faceContainsEdge(face.face, edge.edge)) {
+        throwReferenceFaceValidationError(operation, path, shape, edge, face);
+    }
+}
+
+template <typename BlendBuilder>
+std::string blendBuilderDiagnosticsJson(BlendBuilder& builder,
+                                        const std::vector<ResolvedEdgeRef>& edges) {
+    try {
+        std::ostringstream out;
+        out << "{";
+        out << "\"isDone\":" << (builder.IsDone() ? "true" : "false") << ",";
+        const int contourCount = builder.NbContours();
+        out << "\"contourCount\":" << contourCount << ",";
+        out << "\"contours\":[";
+        for (int contour = 1; contour <= contourCount; ++contour) {
+            if (contour > 1) out << ',';
+            out << "{";
+            out << "\"index\":" << contour << ",";
+            out << "\"edgeCount\":" << builder.NbEdges(contour) << ",";
+            out << "\"length\":" << builder.Length(contour) << ",";
+            out << "\"closed\":" << (builder.Closed(contour) ? "true" : "false") << ",";
+            out << "\"closedAndTangent\":" << (builder.ClosedAndTangent(contour) ? "true" : "false") << ",";
+            out << "\"requestedEdgeTopoIds\":[";
+            bool first = true;
+            for (const ResolvedEdgeRef& edge : edges) {
+                if (builder.Contour(edge.edge) == contour) {
+                    if (!first) out << ',';
+                    first = false;
+                    out << edge.topoId;
+                }
+            }
+            out << "]}";
+        }
+        out << "]}";
+        return out.str();
+    } catch (const Standard_Failure& sf) {
+        std::ostringstream out;
+        out << "{\"diagnosticsError\":"; appendJsonString(out, sf.what()); out << "}";
+        return out.str();
+    }
+}
+
+void throwStructuredBlendOperationError(const std::string& operation,
+                                        const std::string& reason,
+                                        const TopoDS_Shape& shape,
+                                        const RevisionMetadata* revision,
+                                        const std::vector<ResolvedEdgeRef>& edgeRefs,
+                                        const std::vector<ResolvedFaceRef>& faceRefs,
+                                        const std::string& builderDiagnosticsJson) {
+    ShapeMap edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    const bool shapeValid = BRepCheck_Analyzer(shape).IsValid();
+
+    std::ostringstream detail;
+    detail << "{";
+    detail << "\"phase\":\"execution\",";
+    detail << "\"operation\":"; appendJsonString(detail, operation); detail << ",";
+    detail << "\"message\":"; appendJsonString(detail, reason); detail << ",";
+    detail << "\"reason\":"; appendJsonString(detail, reason); detail << ",";
+    detail << "\"requestedEdgeRefs\":"; appendEdgeRefArrayJson(detail, edgeRefs); detail << ",";
+    detail << "\"failingEdgeRefs\":[";
+    for (std::size_t i = 0; i < edgeRefs.size(); ++i) {
+        if (i > 0) detail << ',';
+        appendJsonString(detail, stableEdgeRefString(edgeRefs[i]));
+    }
+    detail << "],";
+    detail << "\"resolvedFaceRefs\":"; appendFaceRefArrayJson(detail, faceRefs); detail << ",";
+    detail << "\"shapeValid\":" << (shapeValid ? "true" : "false") << ",";
+    detail << "\"shapeEdgeCount\":" << edges.Extent() << ",";
+    detail << "\"builder\":" << (builderDiagnosticsJson.empty() ? "{}" : builderDiagnosticsJson);
+    if (revision != nullptr) {
+        detail << ",\"revisionId\":"; appendJsonString(detail, revision->revisionId);
+        detail << ",\"operationId\":";
+        if (revision->operationId.empty()) detail << "null"; else appendJsonString(detail, revision->operationId);
+        detail << ",\"topologyHash\":"; appendJsonString(detail, revision->topologyHash);
+    }
+    detail << "}";
+    throwKernelError("OPERATION_FAILED", detail.str());
 }
 
 template <typename ShapeListT>
@@ -3041,6 +3221,14 @@ struct OcctKernel::Impl {
 
 OcctKernel::OcctKernel() : _impl(new Impl()) {}
 OcctKernel::~OcctKernel() { delete _impl; }
+
+std::string OcctKernel::getLastError() const {
+    return g_lastKernelErrorJson;
+}
+
+void OcctKernel::clearLastError() {
+    g_lastKernelErrorJson.clear();
+}
 
 // ---------------------------------------------------------------------------
 // Handle management
@@ -3993,11 +4181,25 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
             }
         }
 
-        mkFillet.Build();
+        try {
+            mkFillet.Build();
+        } catch (const Standard_Failure& sf) {
+            throwStructuredBlendOperationError(operation,
+                                               sf.what(),
+                                               shape,
+                                               sourceRevision,
+                                               appliedEdges,
+                                               {},
+                                               blendBuilderDiagnosticsJson(mkFillet, appliedEdges));
+        }
         if (!mkFillet.IsDone() || mkFillet.Shape().IsNull()) {
-            std::vector<std::string> failing;
-            for (const ResolvedEdgeRef& edge : appliedEdges) failing.push_back(stableEdgeRefString(edge));
-            throwStructuredOperationError(operation, "BRepFilletAPI_MakeFillet failed", failing);
+            throwStructuredBlendOperationError(operation,
+                                               "BRepFilletAPI_MakeFillet failed",
+                                               shape,
+                                               sourceRevision,
+                                               appliedEdges,
+                                               {},
+                                               blendBuilderDiagnosticsJson(mkFillet, appliedEdges));
         }
 
         const uint32_t resultId = storeShapeWithMetadata(mkFillet.Shape(),
@@ -4075,6 +4277,7 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
 
         BRepFilletAPI_MakeChamfer mkChamfer(shape);
         std::vector<ResolvedEdgeRef> appliedEdges;
+        std::vector<ResolvedFaceRef> appliedReferenceFaces;
         std::vector<std::string> normalizedParameters;
 
         auto addChamferForEdge = [&](const mini_json::Value& entryValue, const std::string& path) {
@@ -4108,8 +4311,35 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                 const double distance = hasMember(entry, "distance")
                     ? requirePositiveMember(entry, "distance", operation, path + ".distance")
                     : requirePositiveMember(root, "distance", operation, "chamfer.distance");
-                mkChamfer.Add(distance, edge.edge);
-                normalized << "\"distance\":" << distance;
+                const mini_json::Value* referenceFaceValue = entry.get("referenceFace");
+                if (referenceFaceValue == nullptr) referenceFaceValue = root.get("referenceFace");
+                if (referenceFaceValue != nullptr) {
+                    ResolvedFaceRef referenceFace = resolveFaceRef(shape, sourceRevision, *referenceFaceValue, operation, path + ".referenceFace");
+                    requireReferenceFaceAdjacentToEdge(shape, edge, referenceFace, operation, path + ".referenceFace");
+                    const ResolvedFaceRef builderReferenceFace = selectSymmetricChamferBuilderFace(shape, sourceRevision, edge, referenceFace);
+                    mkChamfer.Add(edge.edge);
+                    const int contour = mkChamfer.Contour(edge.edge);
+                    if (contour <= 0) {
+                        throwStructuredBlendOperationError(operation,
+                                                           "BRepFilletAPI_MakeChamfer did not create a contour for the selected edge",
+                                                           shape,
+                                                           sourceRevision,
+                                                           { edge },
+                                                           { builderReferenceFace },
+                                                           blendBuilderDiagnosticsJson(mkChamfer, { edge }));
+                    }
+                    mkChamfer.SetDist(distance, contour, builderReferenceFace.face);
+                    appliedReferenceFaces.push_back(builderReferenceFace);
+                    normalized << "\"distance\":" << distance << ",\"referenceFace\":";
+                    appendEntityRefJson(normalized, referenceFace);
+                    if (builderReferenceFace.topoId != referenceFace.topoId) {
+                        normalized << ",\"builderReferenceFace\":";
+                        appendEntityRefJson(normalized, builderReferenceFace);
+                    }
+                } else {
+                    mkChamfer.Add(distance, edge.edge);
+                    normalized << "\"distance\":" << distance;
+                }
             } else if (mode == "twoDistance") {
                 const double distance1 = hasMember(entry, "distance1")
                     ? requirePositiveMember(entry, "distance1", operation, path + ".distance1")
@@ -4123,7 +4353,9 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                     throwStructuredValidation(operation, path + ".referenceFace", "twoDistance chamfers require a referenceFace for the distance1 side");
                 }
                 ResolvedFaceRef referenceFace = resolveFaceRef(shape, sourceRevision, *referenceFaceValue, operation, path + ".referenceFace");
+                requireReferenceFaceAdjacentToEdge(shape, edge, referenceFace, operation, path + ".referenceFace");
                 mkChamfer.Add(distance1, distance2, edge.edge, referenceFace.face);
+                appliedReferenceFaces.push_back(referenceFace);
                 normalized << "\"distance1\":" << distance1 << ",\"distance2\":" << distance2 << ",\"referenceFace\":";
                 appendEntityRefJson(normalized, referenceFace);
             } else if (mode == "distanceAngle") {
@@ -4138,7 +4370,9 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                     throwStructuredValidation(operation, path + ".referenceFace", "distanceAngle chamfers require a referenceFace for the measured side");
                 }
                 ResolvedFaceRef referenceFace = resolveFaceRef(shape, sourceRevision, *referenceFaceValue, operation, path + ".referenceFace");
+                requireReferenceFaceAdjacentToEdge(shape, edge, referenceFace, operation, path + ".referenceFace");
                 mkChamfer.AddDA(distance, angle, edge.edge, referenceFace.face);
+                appliedReferenceFaces.push_back(referenceFace);
                 normalized << "\"distance\":" << distance << ",\"angleRadians\":" << angle << ",\"referenceFace\":";
                 appendEntityRefJson(normalized, referenceFace);
             } else {
@@ -4175,11 +4409,25 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
             }
         }
 
-        mkChamfer.Build();
+        try {
+            mkChamfer.Build();
+        } catch (const Standard_Failure& sf) {
+            throwStructuredBlendOperationError(operation,
+                                               sf.what(),
+                                               shape,
+                                               sourceRevision,
+                                               appliedEdges,
+                                               appliedReferenceFaces,
+                                               blendBuilderDiagnosticsJson(mkChamfer, appliedEdges));
+        }
         if (!mkChamfer.IsDone() || mkChamfer.Shape().IsNull()) {
-            std::vector<std::string> failing;
-            for (const ResolvedEdgeRef& edge : appliedEdges) failing.push_back(stableEdgeRefString(edge));
-            throwStructuredOperationError(operation, "BRepFilletAPI_MakeChamfer failed", failing);
+            throwStructuredBlendOperationError(operation,
+                                               "BRepFilletAPI_MakeChamfer failed",
+                                               shape,
+                                               sourceRevision,
+                                               appliedEdges,
+                                               appliedReferenceFaces,
+                                               blendBuilderDiagnosticsJson(mkChamfer, appliedEdges));
         }
 
         const uint32_t resultId = storeShapeWithMetadata(mkChamfer.Shape(),
@@ -4894,6 +5142,8 @@ std::string OcctKernel::getCapabilities() const {
     return "{"
         "\"featureEdgesV1\":true,"
         "\"rawEdgeSegmentsV1\":true,"
+        "\"featurePreviewV1\":true,"
+        "\"tessellationOptionsV1\":true,"
         "\"triangleNormalsV1\":true,"
         "\"triangleFaceMappingV1\":true,"
         "\"topologySubshapesV1\":true,"
@@ -5048,7 +5298,7 @@ std::string OcctKernel::getCapabilities() const {
 
 std::string OcctKernel::getKernelVersionInfo() const {
     return "{"
-        "\"kernelVersion\":\"" OCC_VERSION_COMPLETE "\"," 
+        "\"kernelVersion\":\"" OCC_VERSION_COMPLETE "\","
         "\"kernelVersionMajor\":" + std::to_string(OCC_VERSION_MAJOR) + ","
         "\"kernelVersionMinor\":" + std::to_string(OCC_VERSION_MINOR) + ","
         "\"kernelVersionMaintenance\":" + std::to_string(OCC_VERSION_MAINTENANCE) + ","
@@ -5400,7 +5650,56 @@ bool OcctKernel::checkValidity(uint32_t id) {
 // Tessellation
 // ---------------------------------------------------------------------------
 
+struct TessellationOptions {
+    bool includeTriangleNormals = true;
+    bool includeTriangleTopoFaceIds = true;
+    bool includeTriangleFaceGroups = true;
+    bool includeTriangleStableHashes = true;
+    bool includeFeatureEdges = true;
+    bool includeRawEdgeSegments = true;
+    std::vector<int> faceTopoIds;
+};
+
+TessellationOptions parseTessellationOptions(const std::string& optionsJson,
+                                             const TopoDS_Shape& shape,
+                                             const RevisionMetadata* revision) {
+    TessellationOptions options;
+    if (optionsJson.empty()) {
+        return options;
+    }
+
+    const mini_json::Value root = mini_json::requireObject(mini_json::parse(optionsJson), "tessellation options");
+    const bool includeMetadata = optionalBoolMember(root, "includeMetadata", true);
+    options.includeTriangleNormals = optionalBoolMember(root, "includeTriangleNormals", includeMetadata);
+    options.includeTriangleTopoFaceIds = optionalBoolMember(root, "includeTriangleTopoFaceIds", includeMetadata);
+    options.includeTriangleFaceGroups = optionalBoolMember(root, "includeTriangleFaceGroups", includeMetadata);
+    options.includeTriangleStableHashes = optionalBoolMember(root, "includeTriangleStableHashes", includeMetadata);
+    options.includeFeatureEdges = optionalBoolMember(root, "includeFeatureEdges", includeMetadata);
+    options.includeRawEdgeSegments = optionalBoolMember(root, "includeRawEdgeSegments", includeMetadata);
+    if (const mini_json::Value* facesValue = root.get("faces")) {
+        const mini_json::Value& faces = mini_json::requireArray(*facesValue, "tessellation options.faces");
+        if (faces.array.empty()) {
+            throwStructuredValidation("tessellate", "faces", "At least one face reference is required when faces is provided");
+        }
+        for (std::size_t i = 0; i < faces.array.size(); ++i) {
+            ResolvedFaceRef face = resolveFaceRef(shape,
+                                                  revision,
+                                                  faces.array[i],
+                                                  "tessellate",
+                                                  "faces[" + std::to_string(i) + "]");
+            if (std::find(options.faceTopoIds.begin(), options.faceTopoIds.end(), face.topoId) == options.faceTopoIds.end()) {
+                options.faceTopoIds.push_back(face.topoId);
+            }
+        }
+    }
+    return options;
+}
+
 std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double angularDeflection) {
+    return tessellateWithOptions(id, linearDeflection, angularDeflection, "");
+}
+
+std::string OcctKernel::tessellateWithOptions(uint32_t id, double linearDeflection, double angularDeflection, const std::string& optionsJson) {
     if (linearDeflection  <= 0) throwKernelError("INVALID_PARAMS", "linearDeflection must be > 0");
     if (angularDeflection <= 0) throwKernelError("INVALID_PARAMS", "angularDeflection must be > 0");
 
@@ -5412,14 +5711,24 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
         const ShapeRecord& record = recordIt->second;
         const TopoDS_Shape& shape = record.shape;
         const RevisionMetadata& revision = record.revision;
-
-        BRepMesh_IncrementalMesh mesh(shape, linearDeflection, false, angularDeflection);
-        mesh.Perform();
-        BRepLib::EnsureNormalConsistency(shape);
+        const TessellationOptions options = parseTessellationOptions(optionsJson, shape, &revision);
 
         ShapeMap faceMap, edgeMap;
         TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
         TopExp::MapShapes(shape, TopAbs_EDGE, edgeMap);
+        if (options.faceTopoIds.empty()) {
+            BRepMesh_IncrementalMesh mesh(shape, linearDeflection, false, angularDeflection);
+            mesh.Perform();
+            BRepLib::EnsureNormalConsistency(shape);
+        } else {
+            for (int faceTopoId : options.faceTopoIds) {
+                const TopoDS_Face& face = TopoDS::Face(faceMap(faceTopoId));
+                BRepMesh_IncrementalMesh mesh(face, linearDeflection, false, angularDeflection);
+                mesh.Perform();
+                BRepLib::EnsureNormalConsistency(face);
+            }
+        }
+        const std::set<int> selectedFaceIds(options.faceTopoIds.begin(), options.faceTopoIds.end());
 
         ShapeToShapeListMap edgeToFaces;
         TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
@@ -5456,6 +5765,10 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
         bool firstRawEdge = true;
 
         for (int faceIndex = 1; faceIndex <= faceMap.Extent(); ++faceIndex) {
+            if (!options.faceTopoIds.empty()
+                && std::find(options.faceTopoIds.begin(), options.faceTopoIds.end(), faceIndex) == options.faceTopoIds.end()) {
+                continue;
+            }
             const TopoDS_Face& face = TopoDS::Face(faceMap(faceIndex));
             TopLoc_Location loc;
             Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
@@ -5510,82 +5823,103 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
                     triangleNormal = gp_Vec(0.0, 0.0, reversed ? -1.0 : 1.0);
                 }
 
-                if (!firstTriangleNormal) triangle_normals_ss << ",";
-                firstTriangleNormal = false;
-                triangle_normals_ss << triangleNormal.X() << "," << triangleNormal.Y() << "," << triangleNormal.Z();
+                if (options.includeTriangleNormals) {
+                    if (!firstTriangleNormal) triangle_normals_ss << ",";
+                    firstTriangleNormal = false;
+                    triangle_normals_ss << triangleNormal.X() << "," << triangleNormal.Y() << "," << triangleNormal.Z();
+                }
 
-                if (!firstTriangleFaceId) triangle_face_ids_ss << ",";
-                firstTriangleFaceId = false;
-                triangle_face_ids_ss << faceIndex;
+                if (options.includeTriangleTopoFaceIds) {
+                    if (!firstTriangleFaceId) triangle_face_ids_ss << ",";
+                    firstTriangleFaceId = false;
+                    triangle_face_ids_ss << faceIndex;
+                }
 
-                if (!firstTriangleFaceGroup) triangle_face_groups_ss << ",";
-                firstTriangleFaceGroup = false;
-                triangle_face_groups_ss << faceIndex;
+                if (options.includeTriangleFaceGroups) {
+                    if (!firstTriangleFaceGroup) triangle_face_groups_ss << ",";
+                    firstTriangleFaceGroup = false;
+                    triangle_face_groups_ss << faceIndex;
+                }
 
-                if (!firstTriangleHash) triangle_hashes_ss << ",";
-                firstTriangleHash = false;
-                appendJsonString(triangle_hashes_ss, faceHashes[static_cast<std::size_t>(faceIndex)]);
+                if (options.includeTriangleStableHashes) {
+                    if (!firstTriangleHash) triangle_hashes_ss << ",";
+                    firstTriangleHash = false;
+                    appendJsonString(triangle_hashes_ss, faceHashes[static_cast<std::size_t>(faceIndex)]);
+                }
             }
 
             globalIndex += (uint32_t)tri->NbNodes();
         }
 
-        for (int edgeIndex = 1; edgeIndex <= edgeMap.Extent(); ++edgeIndex) {
-            const TopoDS_Edge& edge = TopoDS::Edge(edgeMap(edgeIndex));
-            const std::vector<gp_Pnt> points = collectEdgePolyline(edge);
-            for (const gp_Pnt& pt : points) {
-                if (!firstRawEdge) raw_edges_ss << ",";
-                firstRawEdge = false;
-                raw_edges_ss << pt.X() << "," << pt.Y() << "," << pt.Z();
+        if (options.includeRawEdgeSegments) {
+            for (int edgeIndex = 1; edgeIndex <= edgeMap.Extent(); ++edgeIndex) {
+                const TopoDS_Edge& edge = TopoDS::Edge(edgeMap(edgeIndex));
+                const std::vector<int> faceIds = faceIdsForEdge(edge, faceMap, edgeToFaces);
+                if (!selectedFaceIds.empty()
+                    && std::none_of(faceIds.begin(), faceIds.end(), [&](int faceId) { return selectedFaceIds.count(faceId) > 0; })) {
+                    continue;
+                }
+                const std::vector<gp_Pnt> points = collectEdgePolyline(edge);
+                for (const gp_Pnt& pt : points) {
+                    if (!firstRawEdge) raw_edges_ss << ",";
+                    firstRawEdge = false;
+                    raw_edges_ss << pt.X() << "," << pt.Y() << "," << pt.Z();
+                }
             }
         }
 
         std::set<std::string> emittedFeatureKeys;
         int chainId = 1;
         bool firstFeatureEdge = true;
-        for (int edgeIndex = 1; edgeIndex <= edgeMap.Extent(); ++edgeIndex) {
-            const TopoDS_Edge& edge = TopoDS::Edge(edgeMap(edgeIndex));
-            const std::vector<TopoDS_Face> adjacentFaces = uniqueAdjacentFaces(edge, edgeToFaces);
-            const bool boundary = adjacentFaces.size() < 2;
-            const bool seam = isTopoFaceSeam(edge, adjacentFaces);
-            const bool sharp = isHardEdge(edge, adjacentFaces);
-            if (!boundary && !seam && !sharp) {
-                continue;
-            }
+        if (options.includeFeatureEdges) {
+            for (int edgeIndex = 1; edgeIndex <= edgeMap.Extent(); ++edgeIndex) {
+                const TopoDS_Edge& edge = TopoDS::Edge(edgeMap(edgeIndex));
+                std::vector<int> faceIds = faceIdsForEdge(edge, faceMap, edgeToFaces);
+                if (!selectedFaceIds.empty()
+                    && std::none_of(faceIds.begin(), faceIds.end(), [&](int faceId) { return selectedFaceIds.count(faceId) > 0; })) {
+                    continue;
+                }
+                const std::vector<TopoDS_Face> adjacentFaces = uniqueAdjacentFaces(edge, edgeToFaces);
+                const bool boundary = adjacentFaces.size() < 2;
+                const bool seam = isTopoFaceSeam(edge, adjacentFaces);
+                const bool sharp = isHardEdge(edge, adjacentFaces);
+                if (!boundary && !seam && !sharp) {
+                    continue;
+                }
 
-            const std::vector<gp_Pnt> points = collectEdgePolyline(edge);
-            if (points.size() < 2) {
-                continue;
-            }
+                const std::vector<gp_Pnt> points = collectEdgePolyline(edge);
+                if (points.size() < 2) {
+                    continue;
+                }
 
-            const std::string dedupeKey = chainDedupeKey(points);
-            if (!emittedFeatureKeys.insert(dedupeKey).second) {
-                continue;
-            }
+                const std::string dedupeKey = chainDedupeKey(points);
+                if (!emittedFeatureKeys.insert(dedupeKey).second) {
+                    continue;
+                }
 
-            std::vector<int> faceIds = faceIdsForEdge(edge, faceMap, edgeToFaces);
-            std::vector<std::string> adjacentFaceHashes;
-            for (int faceId : faceIds) {
-                adjacentFaceHashes.push_back(faceHashes[static_cast<std::size_t>(faceId)]);
-            }
-            const std::string edgeHash = revision.edgeStableHashes.size() == static_cast<std::size_t>(edgeMap.Extent())
-                ? revision.edgeStableHashes[static_cast<std::size_t>(edgeIndex - 1)]
-                : makeEdgeStableHash(edge, adjacentFaceHashes);
-            const bool closed = samePointWithinTolerance(points.front(), points.back());
+                std::vector<std::string> adjacentFaceHashes;
+                for (int faceId : faceIds) {
+                    adjacentFaceHashes.push_back(faceHashes[static_cast<std::size_t>(faceId)]);
+                }
+                const std::string edgeHash = revision.edgeStableHashes.size() == static_cast<std::size_t>(edgeMap.Extent())
+                    ? revision.edgeStableHashes[static_cast<std::size_t>(edgeIndex - 1)]
+                    : makeEdgeStableHash(edge, adjacentFaceHashes);
+                const bool closed = samePointWithinTolerance(points.front(), points.back());
 
-            if (!firstFeatureEdge) feature_edges_ss << ",";
-            firstFeatureEdge = false;
-            feature_edges_ss << "{";
-            feature_edges_ss << "\"points\":"; appendPointArrayJson(feature_edges_ss, points); feature_edges_ss << ",";
-            feature_edges_ss << "\"isClosed\":" << (closed ? "true" : "false") << ",";
-            feature_edges_ss << "\"chainId\":" << chainId++ << ",";
-            feature_edges_ss << "\"faceIndices\":"; appendIntArrayJson(feature_edges_ss, faceIds); feature_edges_ss << ",";
-            feature_edges_ss << "\"topoFaceIds\":"; appendIntArrayJson(feature_edges_ss, faceIds); feature_edges_ss << ",";
-            feature_edges_ss << "\"isBoundary\":" << (boundary ? "true" : "false") << ",";
-            feature_edges_ss << "\"isSharp\":" << (sharp ? "true" : "false") << ",";
-            feature_edges_ss << "\"isSeam\":" << (seam ? "true" : "false") << ",";
-            feature_edges_ss << "\"stableHash\":"; appendJsonString(feature_edges_ss, edgeHash);
-            feature_edges_ss << "}";
+                if (!firstFeatureEdge) feature_edges_ss << ",";
+                firstFeatureEdge = false;
+                feature_edges_ss << "{";
+                feature_edges_ss << "\"points\":"; appendPointArrayJson(feature_edges_ss, points); feature_edges_ss << ",";
+                feature_edges_ss << "\"isClosed\":" << (closed ? "true" : "false") << ",";
+                feature_edges_ss << "\"chainId\":" << chainId++ << ",";
+                feature_edges_ss << "\"faceIndices\":"; appendIntArrayJson(feature_edges_ss, faceIds); feature_edges_ss << ",";
+                feature_edges_ss << "\"topoFaceIds\":"; appendIntArrayJson(feature_edges_ss, faceIds); feature_edges_ss << ",";
+                feature_edges_ss << "\"isBoundary\":" << (boundary ? "true" : "false") << ",";
+                feature_edges_ss << "\"isSharp\":" << (sharp ? "true" : "false") << ",";
+                feature_edges_ss << "\"isSeam\":" << (seam ? "true" : "false") << ",";
+                feature_edges_ss << "\"stableHash\":"; appendJsonString(feature_edges_ss, edgeHash);
+                feature_edges_ss << "}";
+            }
         }
 
         positions_ss            << "]";
@@ -5602,13 +5936,25 @@ std::string OcctKernel::tessellate(uint32_t id, double linearDeflection, double 
         result << "{";
         result << "\"positions\":"    << positions_ss.str() << ",";
         result << "\"normals\":"      << normals_ss.str()   << ",";
-        result << "\"indices\":"      << indices_ss.str()   << ",";
-        result << "\"triangleNormals\":" << triangle_normals_ss.str() << ",";
-        result << "\"triangleTopoFaceIds\":" << triangle_face_ids_ss.str() << ",";
-        result << "\"triangleFaceGroups\":" << triangle_face_groups_ss.str() << ",";
-        result << "\"triangleStableHashes\":" << triangle_hashes_ss.str() << ",";
-        result << "\"featureEdges\":" << feature_edges_ss.str() << ",";
-        result << "\"rawEdgeSegments\":" << raw_edges_ss.str();
+        result << "\"indices\":"      << indices_ss.str();
+        if (options.includeTriangleNormals) {
+            result << ",\"triangleNormals\":" << triangle_normals_ss.str();
+        }
+        if (options.includeTriangleTopoFaceIds) {
+            result << ",\"triangleTopoFaceIds\":" << triangle_face_ids_ss.str();
+        }
+        if (options.includeTriangleFaceGroups) {
+            result << ",\"triangleFaceGroups\":" << triangle_face_groups_ss.str();
+        }
+        if (options.includeTriangleStableHashes) {
+            result << ",\"triangleStableHashes\":" << triangle_hashes_ss.str();
+        }
+        if (options.includeFeatureEdges) {
+            result << ",\"featureEdges\":" << feature_edges_ss.str();
+        }
+        if (options.includeRawEdgeSegments) {
+            result << ",\"rawEdgeSegments\":" << raw_edges_ss.str();
+        }
         result << "}";
         return result.str();
     } catch (const std::runtime_error&) {
@@ -5688,14 +6034,14 @@ std::string OcctKernel::importStepPackage(const std::string& content,
     options.sewingTolerance = sewingTolerance > 0 ? sewingTolerance : 1.0e-6;
 
     StepImportRunResult result = runStepImport(content, options);
-    
+
     std::ostringstream ss;
     ss << "{";
     ss << "\"readStatus\":\"" << escapeJson(result.readStatus) << "\",";
     ss << "\"transferStatus\":\"" << escapeJson(result.transferStatus) << "\",";
     ss << "\"healed\":" << (result.healed ? "true" : "false") << ",";
     ss << "\"isValid\":" << (result.isValid ? "true" : "false") << ",";
-    
+
     ss << "\"messageList\":[";
     for (std::size_t i = 0; i < result.messages.size(); ++i) {
         const StepImportMessage& message = result.messages[i];
@@ -5728,7 +6074,7 @@ std::string OcctKernel::importStepPackage(const std::string& content,
                                                  { result.healed
                                                      ? "STEP heal/sew/fixup stage changed topology; detailed per-subshape lineage is unresolved"
                                                      : "STEP import identity is geometry-derived because source semantic stable naming is not available" });
-        
+
         ss << ",\"shapeId\":" << shapeId << ",";
 
         // Let's get the revision info from records

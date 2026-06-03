@@ -682,6 +682,19 @@ export interface TessellateParams {
      * Defaults to 0.5 radians.
      */
     readonly angularDeflection?: number;
+    /**
+     * Convenience switch for live previews. When false, only positions, normals,
+     * and indices are returned unless a more specific include flag is set.
+     */
+    readonly includeMetadata?: boolean;
+    readonly includeTriangleNormals?: boolean;
+    readonly includeTriangleTopoFaceIds?: boolean;
+    readonly includeTriangleFaceGroups?: boolean;
+    readonly includeTriangleStableHashes?: boolean;
+    readonly includeFeatureEdges?: boolean;
+    readonly includeRawEdgeSegments?: boolean;
+    /** Optional exact face subset to tessellate. Omitted = whole shape. */
+    readonly faces?: readonly FaceRef[];
 }
 
 /**
@@ -720,6 +733,47 @@ export interface FeatureEdgeChain {
     readonly isSharp: boolean;
     readonly isSeam?: boolean;
     readonly stableHash?: string;
+}
+
+export type FeaturePreviewRequest =
+    | { readonly operation: 'extrudeProfile'; readonly params: ExtrudeProfileFeatureParams }
+    | { readonly operation: 'extrudeCutProfile'; readonly params: ExtrudeCutProfileFeatureParams }
+    | { readonly operation: 'revolveProfile'; readonly params: RevolveProfileFeatureParams }
+    | { readonly operation: 'revolveCutProfile'; readonly params: RevolveCutProfileFeatureParams }
+    | { readonly operation: 'sweepProfile'; readonly params: SweepProfileFeatureParams }
+    | { readonly operation: 'loft'; readonly params: LoftFeatureParams }
+    | { readonly operation: 'filletEdges'; readonly params: FilletFeatureParams }
+    | { readonly operation: 'chamferEdges'; readonly params: ChamferFeatureParams }
+    | { readonly operation: 'transformShape'; readonly params: TransformParams }
+    | { readonly operation: 'booleanUnion'; readonly params: BooleanParams }
+    | { readonly operation: 'booleanSubtract'; readonly params: BooleanParams }
+    | { readonly operation: 'booleanIntersect'; readonly params: BooleanParams };
+
+export type FeaturePreviewTessellationParams = Omit<TessellateParams, 'shape'>;
+
+export type FeaturePreviewParams = FeaturePreviewRequest & {
+    /** Defaults to true. Disable when only topology or wireframe is needed. */
+    readonly includeMesh?: boolean;
+    /** When true, returns selectable feature-edge chains as a preview wireframe. */
+    readonly includeWireframe?: boolean;
+    /** When true, returns topology for the temporary exact preview result. */
+    readonly includeTopology?: boolean;
+    /** Defaults to false so live previews do not leak resident exact results. */
+    readonly retainPreviewShape?: boolean;
+    /** Mesh controls for the temporary preview result. Defaults to lightweight metadata. */
+    readonly tessellation?: FeaturePreviewTessellationParams;
+};
+
+export interface FeaturePreviewResult {
+    readonly operation: FeaturePreviewRequest['operation'];
+    readonly mesh?: TessellationResult;
+    readonly wireframe?: readonly FeatureEdgeChain[];
+    readonly topology?: TopologyResult;
+    readonly previewShape?: ShapeHandle;
+    readonly revision?: RevisionInfo;
+    readonly lineage?: BlendOperationResult['lineage'];
+    readonly blendFaces?: BlendOperationResult['blendFaces'];
+    readonly status?: BlendOperationResult['status'];
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +958,8 @@ export interface BoundingBox {
 export interface KernelCapabilities {
     readonly featureEdgesV1: boolean;
     readonly rawEdgeSegmentsV1: boolean;
+    readonly featurePreviewV1?: boolean;
+    readonly tessellationOptionsV1?: boolean;
     readonly triangleNormalsV1: boolean;
     readonly triangleFaceMappingV1: boolean;
     readonly topologySubshapesV1: boolean;
@@ -1102,6 +1158,17 @@ export interface ShapeIntersectionResult {
 }
 
 export interface ShapeSupportRef {
+    /**
+     * Convenience switch for live previews. When false, only positions, normals,
+     * and indices are returned unless a more specific include flag is set.
+     */
+    readonly includeMetadata?: boolean;
+    readonly includeTriangleNormals?: boolean;
+    readonly includeTriangleTopoFaceIds?: boolean;
+    readonly includeTriangleFaceGroups?: boolean;
+    readonly includeTriangleStableHashes?: boolean;
+    readonly includeFeatureEdges?: boolean;
+    readonly includeRawEdgeSegments?: boolean;
     readonly kind: 'vertex' | 'edge' | 'face';
     readonly topoId?: number;
     readonly stableHash?: string;

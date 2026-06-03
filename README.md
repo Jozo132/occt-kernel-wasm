@@ -499,7 +499,7 @@ const topo = kernel.getTopology(box);
 // }
 
 const capabilities = kernel.getCapabilities();
-// featureEdgesV1, topologyHierarchyV1, versionInfoV1, analysisV1,
+// featureEdgesV1, featurePreviewV1, tessellationOptionsV1, topologyHierarchyV1, versionInfoV1, analysisV1,
 // sessionHandlesV1, triangleNormalsV1, topologySubshapesV1, historyV1,
 // entityRemapV1, revisionRetentionV1, checkpointV1, and native exact blend
 // operations are available. capabilities.analysis and capabilities.runtime
@@ -523,7 +523,7 @@ const schema = kernel.getOperationSchema();
 ```ts
 const version = kernel.getVersionInfo();
 // {
-//   libraryVersion: '1.0.0',
+//   libraryVersion: '1.1.0',
 //   apiVersion: 1,
 //   kernelVersion: '8.0.0',
 //   checkpointSchemaVersion: 1,
@@ -643,6 +643,48 @@ const mesh = kernel.tessellate({ shape: box, linearDeflection: 0.1 });
 //   rawEdgeSegments?: Float32Array // debug only; do not use for selection
 // }
 ```
+
+For interactive previews, omit heavyweight topology metadata and edge extraction:
+
+```ts
+const previewMesh = kernel.tessellate({
+    shape: liveBlend,
+    linearDeflection: 0.25,
+    includeMetadata: false,
+});
+```
+
+You can also tessellate only changed exact faces and opt individual metadata channels back in:
+
+```ts
+const facePatch = kernel.tessellate({
+    shape: liveBlend,
+    faces: [{ topoId: 12 }],
+    includeMetadata: false,
+    includeTriangleTopoFaceIds: true,
+});
+```
+
+### Live feature previews
+
+Use `previewFeature` while the user edits feature parameters. It runs the same exact feature implementation against the current resident shape, returns lightweight render feedback, and disposes the temporary exact result by default so the model is not committed.
+
+```ts
+const preview = kernel.previewFeature({
+    operation: 'filletEdges',
+    params: {
+        shape: box,
+        spec: { schemaVersion: 1, edges: [{ topoId: 1, radius: liveRadius }] },
+    },
+    includeWireframe: true,
+    tessellation: { linearDeflection: 0.35, angularDeflection: 0.35 },
+});
+
+sceneMesh.geometry.setAttribute('position', new THREE.BufferAttribute(preview.mesh!.positions, 3));
+wireOverlay.update(preview.wireframe ?? []);
+```
+
+The generic preview surface supports `extrudeProfile`, `extrudeCutProfile`, `revolveProfile`, `revolveCutProfile`, `sweepProfile`, `loft`, `filletEdges`, `chamferEdges`, `transformShape`, `booleanUnion`, `booleanSubtract`, and `booleanIntersect`. Pass `retainPreviewShape: true` only when the UI needs to inspect the temporary exact shape; otherwise apply the feature later with the normal exact operation once the user commits.
 
 Pass directly to Three.js `BufferGeometry`:
 ```ts

@@ -1790,6 +1790,8 @@ export class MockNativeKernel {
         return JSON.stringify({
             featureEdgesV1: true,
             rawEdgeSegmentsV1: true,
+            featurePreviewV1: true,
+            tessellationOptionsV1: true,
             triangleNormalsV1: true,
             triangleFaceMappingV1: true,
             topologySubshapesV1: true,
@@ -1949,18 +1951,34 @@ export class MockNativeKernel {
 
     // -- Tessellation --
 
-    tessellate(id: number, _linearDeflection: number, _angularDeflection: number): string {
+    tessellate(id: number, linearDeflection: number, angularDeflection: number): string {
+        return this.tessellateWithOptions(id, linearDeflection, angularDeflection, '');
+    }
+
+    tessellateWithOptions(id: number, _linearDeflection: number, _angularDeflection: number, optionsJson: string): string {
         this._require(id);
+        const options = optionsJson.length > 0 ? JSON.parse(optionsJson) as Record<string, unknown> : {};
+        const includeMetadata = options.includeMetadata !== false;
+        const includeTriangleNormals = options.includeTriangleNormals ?? includeMetadata;
+        const includeTriangleTopoFaceIds = options.includeTriangleTopoFaceIds ?? includeMetadata;
+        const includeTriangleFaceGroups = options.includeTriangleFaceGroups ?? includeMetadata;
+        const includeTriangleStableHashes = options.includeTriangleStableHashes ?? includeMetadata;
+        const includeFeatureEdges = options.includeFeatureEdges ?? includeMetadata;
+        const includeRawEdgeSegments = options.includeRawEdgeSegments ?? includeMetadata;
+        const hasFaceSubset = Array.isArray(options.faces) && options.faces.length > 0;
+        const triangleTopoFaceId = hasFaceSubset && typeof (options.faces as Array<{ topoId?: unknown }>)[0]?.topoId === 'number'
+            ? (options.faces as Array<{ topoId: number }>)[0].topoId
+            : 1;
         // Minimal triangle (not geometrically meaningful — mock only)
         return JSON.stringify({
             positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
             normals:   [0, 0, 1, 0, 0, 1, 0, 0, 1],
             indices:   [0, 1, 2],
-            triangleNormals: [0, 0, 1],
-            triangleTopoFaceIds: [1],
-            triangleFaceGroups: [1],
-            triangleStableHashes: ['F:mock_face_1'],
-            featureEdges: [
+            ...(includeTriangleNormals ? { triangleNormals: [0, 0, 1] } : {}),
+            ...(includeTriangleTopoFaceIds ? { triangleTopoFaceIds: [triangleTopoFaceId] } : {}),
+            ...(includeTriangleFaceGroups ? { triangleFaceGroups: [triangleTopoFaceId] } : {}),
+            ...(includeTriangleStableHashes ? { triangleStableHashes: ['F:mock_face_1'] } : {}),
+            ...(includeFeatureEdges ? { featureEdges: [
                 {
                     points: [[0, 0, 0], [1, 0, 0]],
                     isClosed: false,
@@ -1972,8 +1990,8 @@ export class MockNativeKernel {
                     isSeam: false,
                     stableHash: 'E:mock_edge_1',
                 },
-            ],
-            rawEdgeSegments: [0, 0, 0, 1, 0, 0],
+            ] } : {}),
+            ...(includeRawEdgeSegments ? { rawEdgeSegments: [0, 0, 0, 1, 0, 0] } : {}),
         });
     }
 
