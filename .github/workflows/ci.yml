@@ -1,4 +1,10 @@
-name: CI
+name: Validation
+
+run-name: Validation / ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }}
+
+concurrency:
+  group: validation-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 on:
   push:
