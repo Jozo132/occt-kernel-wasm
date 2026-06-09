@@ -75,6 +75,14 @@
 #include <NCollection_Array1.hxx>
 #include <TopExp_Explorer.hxx>
 
+// Canonical B-spline conversion used as a native retry basis for blends on
+// swept support surfaces (Geom_SurfaceOfLinearExtrusion / Revolution / Offset).
+#include <ShapeBuild_ReShape.hxx>
+#include <ShapeCustom.hxx>
+#include <ShapeCustom_ConvertToBSpline.hxx>
+#include <BRepTools_Modifier.hxx>
+#include <NCollection_DataMap.hxx>
+
 // Tessellation
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
@@ -119,6 +127,7 @@
 #include <OSD_Protection.hxx>
 
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -4011,6 +4020,107 @@ uint32_t OcctKernel::chamferEdges(uint32_t id, double distance) {
     return 0;
 }
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// Canonical B-spline retry basis for blend operations
+//
+// BRepFilletAPI_MakeFillet / MakeChamfer (the ChFi3d core) are unreliable when
+// a blend support face is a swept surface (Geom_SurfaceOfLinearExtrusion,
+// Geom_SurfaceOfRevolution, Geom_OffsetSurface), in particular for concave
+// b-spline directrices produced by sketch-profile prisms. The standard OCCT
+// remedy is to convert exactly those surfaces to their exact B-spline basis
+// (ShapeCustom_ConvertToBSpline) and run the blend on the converted shape.
+// The conversion is geometrically exact, so analytic faces (planes, cylinders)
+// stay untouched and the model does not lose precision.
+// ---------------------------------------------------------------------------
+
+struct CanonicalBlendBasis {
+    bool available = false;
+    TopoDS_Shape shape;
+    BRepTools_Modifier modifier;
+};
+
+// Builds the canonical (swept-surfaces-to-bspline) form of `shape`. Returns an
+// unavailable basis when nothing needed conversion or conversion failed, in
+// which case the caller must surface the original blend failure unchanged.
+std::unique_ptr<CanonicalBlendBasis> makeCanonicalBlendBasis(const TopoDS_Shape& shape) {
+    auto basis = std::make_unique<CanonicalBlendBasis>();
+    try {
+        Handle(ShapeCustom_ConvertToBSpline) conversion = new ShapeCustom_ConvertToBSpline;
+        conversion->SetExtrusionMode(true);
+        conversion->SetRevolutionMode(true);
+        conversion->SetOffsetMode(true);
+        conversion->SetPlaneMode(false);
+
+        NCollection_DataMap<TopoDS_Shape, TopoDS_Shape, TopTools_ShapeMapHasher> context;
+        const TopoDS_Shape converted = ShapeCustom::ApplyModifier(shape, conversion, context, basis->modifier);
+        if (converted.IsNull() || converted.IsSame(shape) || !basis->modifier.IsDone()) {
+            return basis;
+        }
+        basis->shape = converted;
+        basis->available = true;
+    } catch (const Standard_Failure&) {
+        basis->available = false;
+    }
+    return basis;
+}
+
+// Maps a subshape of the original blend operand onto its counterpart in the
+// canonical basis. Subshapes untouched by the conversion map to themselves.
+TopoDS_Shape mapToCanonicalBasis(const BRepTools_Modifier& modifier, const TopoDS_Shape& shape) {
+    try {
+        const TopoDS_Shape& mapped = modifier.ModifiedShape(shape);
+        if (!mapped.IsNull()) {
+            return mapped;
+        }
+    } catch (const Standard_Failure&) {
+        // Shape was not part of the initial shape (e.g. builder-generated);
+        // treat it as unmapped.
+    }
+    return shape;
+}
+
+// History adapter that composes the canonical-basis conversion with the blend
+// builder history, so stable-hash lineage keeps resolving against the
+// ORIGINAL operand subshapes even though the blend ran on the converted shape.
+template <typename Builder>
+struct CanonicalBlendHistory {
+    const BRepTools_Modifier& modifier;
+    Builder& builder;
+
+    ShapeList Modified(const TopoDS_Shape& shape) {
+        const TopoDS_Shape mapped = mapToCanonicalBasis(modifier, shape);
+        ShapeList list = builder.Modified(mapped);
+        if (!mapped.IsSame(shape)) {
+            // The conversion itself modified this subshape; if the blend then
+            // retained it, lineage must still reach the converted counterpart.
+            list.Append(mapped);
+        }
+        return list;
+    }
+
+    ShapeList Generated(const TopoDS_Shape& shape) {
+        return builder.Generated(mapToCanonicalBasis(modifier, shape));
+    }
+};
+
+// Re-resolved edge refs against the canonical basis: same identity (topoId and
+// stableHash are reported from the original resolution), converted TopoDS edge.
+std::vector<ResolvedEdgeRef> mapEdgeRefsToCanonicalBasis(const BRepTools_Modifier& modifier,
+                                                         const std::vector<ResolvedEdgeRef>& edges) {
+    std::vector<ResolvedEdgeRef> mapped;
+    mapped.reserve(edges.size());
+    for (const ResolvedEdgeRef& edge : edges) {
+        ResolvedEdgeRef copy = edge;
+        copy.edge = TopoDS::Edge(mapToCanonicalBasis(modifier, edge.edge));
+        mapped.push_back(copy);
+    }
+    return mapped;
+}
+
+} // namespace
+
 std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& specJson) {
     const std::string operation = "filletEdges";
     try {
@@ -4043,16 +4153,39 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
             throwStructuredValidation(operation, "fillet.tangentPropagation", "Disabling tangent propagation is not exposed by this OCCT build", "fillet.nonPropagatingEdges");
         }
 
-        BRepFilletAPI_MakeFillet mkFillet(shape, parseFilletShape(optionalStringMember(root, "blendShape", "rational"), operation, "fillet.blendShape"));
+        const ChFi3d_FilletShape filletShape = parseFilletShape(optionalStringMember(root, "blendShape", "rational"), operation, "fillet.blendShape");
+        BRepFilletAPI_MakeFillet mkFillet(shape, filletShape);
         const std::string continuity = optionalStringMember(root, "continuity", "C1");
         const double angularTolerance = optionalNumberMember(root, "angularTolerance", 1.0e-2);
         if (!std::isfinite(angularTolerance) || angularTolerance <= 0.0) {
             throwStructuredValidation(operation, "fillet.angularTolerance", "angularTolerance must be finite and > 0");
         }
-        mkFillet.SetContinuity(parseContinuity(continuity, operation, "fillet.continuity"), angularTolerance);
+        const GeomAbs_Shape blendContinuity = parseContinuity(continuity, operation, "fillet.continuity");
+        mkFillet.SetContinuity(blendContinuity, angularTolerance);
 
         std::vector<ResolvedEdgeRef> appliedEdges;
         std::vector<std::string> normalizedParameters;
+
+        // Replayable per-edge radius programme: the same parameters must be
+        // re-applied verbatim when the blend is retried on the canonical
+        // B-spline basis of the operand.
+        struct FilletReplayOp {
+            int kind = 0; // 0: constant radius, 1: start/end radii, 2: radius table
+            double radius1 = 0.0;
+            double radius2 = 0.0;
+            std::shared_ptr<Point2dArray> table;
+        };
+        std::vector<FilletReplayOp> replayOps;
+        const auto applyFilletOp = [](BRepFilletAPI_MakeFillet& mk, const FilletReplayOp& op, const TopoDS_Edge& edge) {
+            if (op.kind == 0) {
+                mk.Add(op.radius1, edge);
+            } else if (op.kind == 1) {
+                mk.Add(op.radius1, op.radius2, edge);
+            } else {
+                mk.Add(*op.table, edge);
+            }
+        };
+
         auto addFilletForEdge = [&](const mini_json::Value& entryValue, const std::string& path) {
             const mini_json::Value& entry = mini_json::requireObject(entryValue, path);
             rejectUnknownFields(entry,
@@ -4094,7 +4227,11 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                 const double radius = hasMember(entry, "radius")
                     ? requirePositiveMember(entry, "radius", operation, path + ".radius")
                     : requirePositiveMember(root, "radius", operation, "fillet.radius");
-                mkFillet.Add(radius, edge.edge);
+                FilletReplayOp op;
+                op.kind = 0;
+                op.radius1 = radius;
+                applyFilletOp(mkFillet, op, edge.edge);
+                replayOps.push_back(op);
                 normalized << "\"radius\":" << radius;
             } else if (mode == "variable" || mode == "startEnd") {
                 if (stationValue != nullptr) {
@@ -4102,7 +4239,7 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                     if (stations.array.size() < 2) {
                         throwStructuredValidation(operation, path + ".stations", "At least two radius stations are required");
                     }
-                    Point2dArray table(1, static_cast<int>(stations.array.size()));
+                    auto table = std::make_shared<Point2dArray>(1, static_cast<int>(stations.array.size()));
                     double previousT = -1.0;
                     normalized << "\"stations\":[";
                     for (std::size_t i = 0; i < stations.array.size(); ++i) {
@@ -4113,12 +4250,16 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                             throwStructuredValidation(operation, path + ".stations[].t", "Station t values must be finite, increasing, and in [0, 1]");
                         }
                         previousT = t;
-                        table.SetValue(static_cast<int>(i + 1), gp_Pnt2d(t, radius));
+                        table->SetValue(static_cast<int>(i + 1), gp_Pnt2d(t, radius));
                         if (i > 0) normalized << ',';
                         normalized << "{\"t\":" << t << ",\"radius\":" << radius << "}";
                     }
                     normalized << "]";
-                    mkFillet.Add(table, edge.edge);
+                    FilletReplayOp op;
+                    op.kind = 2;
+                    op.table = table;
+                    applyFilletOp(mkFillet, op, edge.edge);
+                    replayOps.push_back(op);
                 } else {
                     const double startRadius = hasMember(entry, "startRadius")
                         ? requirePositiveMember(entry, "startRadius", operation, path + ".startRadius")
@@ -4126,7 +4267,12 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                     const double endRadius = hasMember(entry, "endRadius")
                         ? requirePositiveMember(entry, "endRadius", operation, path + ".endRadius")
                         : requirePositiveMember(root, "endRadius", operation, "fillet.endRadius");
-                    mkFillet.Add(startRadius, endRadius, edge.edge);
+                    FilletReplayOp op;
+                    op.kind = 1;
+                    op.radius1 = startRadius;
+                    op.radius2 = endRadius;
+                    applyFilletOp(mkFillet, op, edge.edge);
+                    replayOps.push_back(op);
                     normalized << "\"startRadius\":" << startRadius << ",\"endRadius\":" << endRadius;
                 }
             } else if (mode == "law") {
@@ -4137,12 +4283,21 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                 const std::string lawType = optionalStringMember(law, "type", "linear");
                 if (lawType == "constant") {
                     const double radius = requirePositiveMember(law, "radius", operation, path + ".law.radius");
-                    mkFillet.Add(radius, edge.edge);
+                    FilletReplayOp op;
+                    op.kind = 0;
+                    op.radius1 = radius;
+                    applyFilletOp(mkFillet, op, edge.edge);
+                    replayOps.push_back(op);
                     normalized << "\"law\":{\"type\":\"constant\",\"radius\":" << radius << "}";
                 } else if (lawType == "linear") {
                     const double startRadius = requirePositiveMember(law, "startRadius", operation, path + ".law.startRadius");
                     const double endRadius = requirePositiveMember(law, "endRadius", operation, path + ".law.endRadius");
-                    mkFillet.Add(startRadius, endRadius, edge.edge);
+                    FilletReplayOp op;
+                    op.kind = 1;
+                    op.radius1 = startRadius;
+                    op.radius2 = endRadius;
+                    applyFilletOp(mkFillet, op, edge.edge);
+                    replayOps.push_back(op);
                     normalized << "\"law\":{\"type\":\"linear\",\"startRadius\":" << startRadius << ",\"endRadius\":" << endRadius << "}";
                 } else {
                     throwStructuredValidation(operation, path + ".law.type", "Only constant and linear radius laws are supported", "fillet.radiusLawTypes");
@@ -4181,20 +4336,68 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
             }
         }
 
+        std::string primaryFailureReason;
         try {
             mkFillet.Build();
         } catch (const Standard_Failure& sf) {
-            throwStructuredBlendOperationError(operation,
-                                               sf.what(),
-                                               shape,
-                                               sourceRevision,
-                                               appliedEdges,
-                                               {},
-                                               blendBuilderDiagnosticsJson(mkFillet, appliedEdges));
+            primaryFailureReason = sf.what() != nullptr && sf.what()[0] != '\0'
+                ? sf.what()
+                : "BRepFilletAPI_MakeFillet raised an exception";
         }
-        if (!mkFillet.IsDone() || mkFillet.Shape().IsNull()) {
+        if (primaryFailureReason.empty() && (!mkFillet.IsDone() || mkFillet.Shape().IsNull())) {
+            primaryFailureReason = "BRepFilletAPI_MakeFillet failed";
+        }
+
+        const auto finalizeFillet = [&](auto& historyBuilder, const TopoDS_Shape& resultShape) -> std::string {
+            const uint32_t resultId = storeShapeWithMetadata(resultShape,
+                                                             "filletEdges",
+                                                             "source=" + sourceRevision->revisionId + ";spec=" + fnv1a64(objectToStableSignature(root)),
+                                                             { sourceRevision->revisionId },
+                                                             "unresolved",
+                                                             "resolved",
+                                                             { "Stable semantic subshape ids are propagated through exact OCCT fillet history; explicit blend lineage remains available in the result payload." });
+            auto resultIt = _impl->records.find(resultId);
+            if (resultIt == _impl->records.end()) {
+                throwKernelError("OPERATION_FAILED", "Stored fillet result is unavailable");
+            }
+            applyHistoryStableHashes(resultIt->second.shape,
+                                     resultIt->second.revision,
+                                     { &sourceIt->second },
+                                     historyBuilder);
+            for (const ResolvedEdgeRef& edge : appliedEdges) {
+                const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
+                                                    resultIt->second.revision.deletedEntities.end(),
+                                                    [&](const DeletedEntityRecord& record) {
+                                                        return record.kind == "edge" && record.stableHash == edge.stableHash;
+                                                    });
+                if (duplicate == resultIt->second.revision.deletedEntities.end()) {
+                    resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
+                }
+            }
+            return makeBlendResultJson(this,
+                                       resultId,
+                                       resultIt->second.shape,
+                                       resultIt->second.revision,
+                                       historyBuilder,
+                                       shape,
+                                       appliedEdges,
+                                       normalizedParameters,
+                                       "filletFace");
+        };
+
+        if (primaryFailureReason.empty()) {
+            return finalizeFillet(mkFillet, mkFillet.Shape());
+        }
+
+        // Native retry: ChFi3d is unreliable on swept support surfaces
+        // (e.g. Geom_SurfaceOfLinearExtrusion walls of sketch-profile prisms
+        // with concave b-spline directrices). Convert exactly those surfaces
+        // to their exact B-spline basis and rerun the same blend programme on
+        // the converted shape, composing both histories for stable identity.
+        std::unique_ptr<CanonicalBlendBasis> basis = makeCanonicalBlendBasis(shape);
+        if (!basis->available) {
             throwStructuredBlendOperationError(operation,
-                                               "BRepFilletAPI_MakeFillet failed",
+                                               primaryFailureReason,
                                                shape,
                                                sourceRevision,
                                                appliedEdges,
@@ -4202,40 +4405,36 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                                                blendBuilderDiagnosticsJson(mkFillet, appliedEdges));
         }
 
-        const uint32_t resultId = storeShapeWithMetadata(mkFillet.Shape(),
-                                                         "filletEdges",
-                                                         "source=" + sourceRevision->revisionId + ";spec=" + fnv1a64(objectToStableSignature(root)),
-                                                         { sourceRevision->revisionId },
-                                                         "unresolved",
-                                                         "resolved",
-                                                         { "Stable semantic subshape ids are propagated through exact OCCT fillet history; explicit blend lineage remains available in the result payload." });
-        auto resultIt = _impl->records.find(resultId);
-        if (resultIt == _impl->records.end()) {
-            throwKernelError("OPERATION_FAILED", "Stored fillet result is unavailable");
+        const std::vector<ResolvedEdgeRef> basisEdges = mapEdgeRefsToCanonicalBasis(basis->modifier, appliedEdges);
+        BRepFilletAPI_MakeFillet mkRetry(basis->shape, filletShape);
+        mkRetry.SetContinuity(blendContinuity, angularTolerance);
+        for (std::size_t i = 0; i < replayOps.size(); ++i) {
+            applyFilletOp(mkRetry, replayOps[i], basisEdges[i].edge);
         }
-        applyHistoryStableHashes(resultIt->second.shape,
-                                 resultIt->second.revision,
-                                 { &sourceIt->second },
-                                 mkFillet);
-        for (const ResolvedEdgeRef& edge : appliedEdges) {
-            const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
-                                                resultIt->second.revision.deletedEntities.end(),
-                                                [&](const DeletedEntityRecord& record) {
-                                                    return record.kind == "edge" && record.stableHash == edge.stableHash;
-                                                });
-            if (duplicate == resultIt->second.revision.deletedEntities.end()) {
-                resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
-            }
+
+        std::string retryFailureReason;
+        try {
+            mkRetry.Build();
+        } catch (const Standard_Failure& sf) {
+            retryFailureReason = sf.what() != nullptr && sf.what()[0] != '\0'
+                ? sf.what()
+                : "BRepFilletAPI_MakeFillet raised an exception on the canonical B-spline basis";
         }
-        return makeBlendResultJson(this,
-                                   resultId,
-                                   resultIt->second.shape,
-                                   resultIt->second.revision,
-                                   mkFillet,
-                                   shape,
-                                   appliedEdges,
-                                   normalizedParameters,
-                                   "filletFace");
+        if (retryFailureReason.empty() && (!mkRetry.IsDone() || mkRetry.Shape().IsNull())) {
+            retryFailureReason = "BRepFilletAPI_MakeFillet failed on the canonical B-spline basis";
+        }
+        if (!retryFailureReason.empty()) {
+            throwStructuredBlendOperationError(operation,
+                                               primaryFailureReason + "; canonical B-spline retry: " + retryFailureReason,
+                                               shape,
+                                               sourceRevision,
+                                               appliedEdges,
+                                               {},
+                                               blendBuilderDiagnosticsJson(mkRetry, basisEdges));
+        }
+
+        CanonicalBlendHistory<BRepFilletAPI_MakeFillet> composedHistory{ basis->modifier, mkRetry };
+        return finalizeFillet(composedHistory, mkRetry.Shape());
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
@@ -4279,6 +4478,15 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
         std::vector<ResolvedEdgeRef> appliedEdges;
         std::vector<ResolvedFaceRef> appliedReferenceFaces;
         std::vector<std::string> normalizedParameters;
+
+        // Replayable per-edge chamfer programme for the canonical-basis retry.
+        struct ChamferReplayOp {
+            int kind = 0; // 0: symmetric, 1: symmetric w/ reference face, 2: twoDistance, 3: distanceAngle
+            double value1 = 0.0; // distance / distance1
+            double value2 = 0.0; // distance2 / angleRadians
+            TopoDS_Face referenceFace; // original-shape face for kinds 1-3
+        };
+        std::vector<ChamferReplayOp> replayOps;
 
         auto addChamferForEdge = [&](const mini_json::Value& entryValue, const std::string& path) {
             const mini_json::Value& entry = mini_json::requireObject(entryValue, path);
@@ -4330,6 +4538,11 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                     }
                     mkChamfer.SetDist(distance, contour, builderReferenceFace.face);
                     appliedReferenceFaces.push_back(builderReferenceFace);
+                    ChamferReplayOp op;
+                    op.kind = 1;
+                    op.value1 = distance;
+                    op.referenceFace = builderReferenceFace.face;
+                    replayOps.push_back(op);
                     normalized << "\"distance\":" << distance << ",\"referenceFace\":";
                     appendEntityRefJson(normalized, referenceFace);
                     if (builderReferenceFace.topoId != referenceFace.topoId) {
@@ -4338,6 +4551,10 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                     }
                 } else {
                     mkChamfer.Add(distance, edge.edge);
+                    ChamferReplayOp op;
+                    op.kind = 0;
+                    op.value1 = distance;
+                    replayOps.push_back(op);
                     normalized << "\"distance\":" << distance;
                 }
             } else if (mode == "twoDistance") {
@@ -4356,6 +4573,12 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                 requireReferenceFaceAdjacentToEdge(shape, edge, referenceFace, operation, path + ".referenceFace");
                 mkChamfer.Add(distance1, distance2, edge.edge, referenceFace.face);
                 appliedReferenceFaces.push_back(referenceFace);
+                ChamferReplayOp op;
+                op.kind = 2;
+                op.value1 = distance1;
+                op.value2 = distance2;
+                op.referenceFace = referenceFace.face;
+                replayOps.push_back(op);
                 normalized << "\"distance1\":" << distance1 << ",\"distance2\":" << distance2 << ",\"referenceFace\":";
                 appendEntityRefJson(normalized, referenceFace);
             } else if (mode == "distanceAngle") {
@@ -4373,6 +4596,12 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                 requireReferenceFaceAdjacentToEdge(shape, edge, referenceFace, operation, path + ".referenceFace");
                 mkChamfer.AddDA(distance, angle, edge.edge, referenceFace.face);
                 appliedReferenceFaces.push_back(referenceFace);
+                ChamferReplayOp op;
+                op.kind = 3;
+                op.value1 = distance;
+                op.value2 = angle;
+                op.referenceFace = referenceFace.face;
+                replayOps.push_back(op);
                 normalized << "\"distance\":" << distance << ",\"angleRadians\":" << angle << ",\"referenceFace\":";
                 appendEntityRefJson(normalized, referenceFace);
             } else {
@@ -4409,20 +4638,64 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
             }
         }
 
+        std::string primaryFailureReason;
         try {
             mkChamfer.Build();
         } catch (const Standard_Failure& sf) {
-            throwStructuredBlendOperationError(operation,
-                                               sf.what(),
-                                               shape,
-                                               sourceRevision,
-                                               appliedEdges,
-                                               appliedReferenceFaces,
-                                               blendBuilderDiagnosticsJson(mkChamfer, appliedEdges));
+            primaryFailureReason = sf.what() != nullptr && sf.what()[0] != '\0'
+                ? sf.what()
+                : "BRepFilletAPI_MakeChamfer raised an exception";
         }
-        if (!mkChamfer.IsDone() || mkChamfer.Shape().IsNull()) {
+        if (primaryFailureReason.empty() && (!mkChamfer.IsDone() || mkChamfer.Shape().IsNull())) {
+            primaryFailureReason = "BRepFilletAPI_MakeChamfer failed";
+        }
+
+        const auto finalizeChamfer = [&](auto& historyBuilder, const TopoDS_Shape& resultShape) -> std::string {
+            const uint32_t resultId = storeShapeWithMetadata(resultShape,
+                                                             "chamferEdges",
+                                                             "source=" + sourceRevision->revisionId + ";spec=" + fnv1a64(objectToStableSignature(root)),
+                                                             { sourceRevision->revisionId },
+                                                             "unresolved",
+                                                             "resolved",
+                                                             { "Stable semantic subshape ids are propagated through exact OCCT chamfer history; explicit blend lineage remains available in the result payload." });
+            auto resultIt = _impl->records.find(resultId);
+            if (resultIt == _impl->records.end()) {
+                throwKernelError("OPERATION_FAILED", "Stored chamfer result is unavailable");
+            }
+            applyHistoryStableHashes(resultIt->second.shape,
+                                     resultIt->second.revision,
+                                     { &sourceIt->second },
+                                     historyBuilder);
+            for (const ResolvedEdgeRef& edge : appliedEdges) {
+                const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
+                                                    resultIt->second.revision.deletedEntities.end(),
+                                                    [&](const DeletedEntityRecord& record) {
+                                                        return record.kind == "edge" && record.stableHash == edge.stableHash;
+                                                    });
+                if (duplicate == resultIt->second.revision.deletedEntities.end()) {
+                    resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
+                }
+            }
+            return makeBlendResultJson(this,
+                                       resultId,
+                                       resultIt->second.shape,
+                                       resultIt->second.revision,
+                                       historyBuilder,
+                                       shape,
+                                       appliedEdges,
+                                       normalizedParameters,
+                                       "chamferFace");
+        };
+
+        if (primaryFailureReason.empty()) {
+            return finalizeChamfer(mkChamfer, mkChamfer.Shape());
+        }
+
+        // Native retry on the canonical B-spline basis (see filletEdgesWithSpec).
+        std::unique_ptr<CanonicalBlendBasis> basis = makeCanonicalBlendBasis(shape);
+        if (!basis->available) {
             throwStructuredBlendOperationError(operation,
-                                               "BRepFilletAPI_MakeChamfer failed",
+                                               primaryFailureReason,
                                                shape,
                                                sourceRevision,
                                                appliedEdges,
@@ -4430,40 +4703,57 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                                                blendBuilderDiagnosticsJson(mkChamfer, appliedEdges));
         }
 
-        const uint32_t resultId = storeShapeWithMetadata(mkChamfer.Shape(),
-                                                         "chamferEdges",
-                                                         "source=" + sourceRevision->revisionId + ";spec=" + fnv1a64(objectToStableSignature(root)),
-                                                         { sourceRevision->revisionId },
-                                                         "unresolved",
-                                                         "resolved",
-                                                         { "Stable semantic subshape ids are propagated through exact OCCT chamfer history; explicit blend lineage remains available in the result payload." });
-        auto resultIt = _impl->records.find(resultId);
-        if (resultIt == _impl->records.end()) {
-            throwKernelError("OPERATION_FAILED", "Stored chamfer result is unavailable");
-        }
-        applyHistoryStableHashes(resultIt->second.shape,
-                                 resultIt->second.revision,
-                                 { &sourceIt->second },
-                                 mkChamfer);
-        for (const ResolvedEdgeRef& edge : appliedEdges) {
-            const auto duplicate = std::find_if(resultIt->second.revision.deletedEntities.begin(),
-                                                resultIt->second.revision.deletedEntities.end(),
-                                                [&](const DeletedEntityRecord& record) {
-                                                    return record.kind == "edge" && record.stableHash == edge.stableHash;
-                                                });
-            if (duplicate == resultIt->second.revision.deletedEntities.end()) {
-                resultIt->second.revision.deletedEntities.push_back({ "edge", edge.stableHash, resultIt->second.revision.operationId, "deleted" });
+        const std::vector<ResolvedEdgeRef> basisEdges = mapEdgeRefsToCanonicalBasis(basis->modifier, appliedEdges);
+        BRepFilletAPI_MakeChamfer mkRetry(basis->shape);
+        std::string retryFailureReason;
+        for (std::size_t i = 0; i < replayOps.size() && retryFailureReason.empty(); ++i) {
+            const ChamferReplayOp& op = replayOps[i];
+            const TopoDS_Edge& edge = basisEdges[i].edge;
+            TopoDS_Face mappedFace;
+            if (op.kind != 0) {
+                mappedFace = TopoDS::Face(mapToCanonicalBasis(basis->modifier, op.referenceFace));
+            }
+            if (op.kind == 0) {
+                mkRetry.Add(op.value1, edge);
+            } else if (op.kind == 1) {
+                mkRetry.Add(edge);
+                const int contour = mkRetry.Contour(edge);
+                if (contour <= 0) {
+                    retryFailureReason = "BRepFilletAPI_MakeChamfer did not create a contour for the selected edge on the canonical B-spline basis";
+                    break;
+                }
+                mkRetry.SetDist(op.value1, contour, mappedFace);
+            } else if (op.kind == 2) {
+                mkRetry.Add(op.value1, op.value2, edge, mappedFace);
+            } else {
+                mkRetry.AddDA(op.value1, op.value2, edge, mappedFace);
             }
         }
-        return makeBlendResultJson(this,
-                                   resultId,
-                                   resultIt->second.shape,
-                                   resultIt->second.revision,
-                                   mkChamfer,
-                                   shape,
-                                   appliedEdges,
-                                   normalizedParameters,
-                                   "chamferFace");
+
+        if (retryFailureReason.empty()) {
+            try {
+                mkRetry.Build();
+            } catch (const Standard_Failure& sf) {
+                retryFailureReason = sf.what() != nullptr && sf.what()[0] != '\0'
+                    ? sf.what()
+                    : "BRepFilletAPI_MakeChamfer raised an exception on the canonical B-spline basis";
+            }
+            if (retryFailureReason.empty() && (!mkRetry.IsDone() || mkRetry.Shape().IsNull())) {
+                retryFailureReason = "BRepFilletAPI_MakeChamfer failed on the canonical B-spline basis";
+            }
+        }
+        if (!retryFailureReason.empty()) {
+            throwStructuredBlendOperationError(operation,
+                                               primaryFailureReason + "; canonical B-spline retry: " + retryFailureReason,
+                                               shape,
+                                               sourceRevision,
+                                               appliedEdges,
+                                               appliedReferenceFaces,
+                                               blendBuilderDiagnosticsJson(mkRetry, basisEdges));
+        }
+
+        CanonicalBlendHistory<BRepFilletAPI_MakeChamfer> composedHistory{ basis->modifier, mkRetry };
+        return finalizeChamfer(composedHistory, mkRetry.Shape());
     } catch (const std::runtime_error&) {
         throw;
     } catch (const Standard_Failure& sf) {
