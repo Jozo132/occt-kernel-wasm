@@ -9,11 +9,13 @@
 #   - cmake >= 3.20
 #
 # Usage:
-#   bash scripts/build-wasm.sh [release|debug|fast] [--reconfigure]
+#   bash scripts/build-wasm.sh [release|debug|fast] [st|mt|all] [--reconfigure]
 #
 # Output:
-#   dist/occt-kernel.js
-#   dist/occt-kernel.wasm
+#   dist/occt-kernel.st.js
+#   dist/occt-kernel.st.wasm
+#   dist/occt-kernel.mt.js
+#   dist/occt-kernel.mt.wasm
 # =============================================================================
 set -euo pipefail
 
@@ -44,6 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
 BUILD_TYPE="release"
+VARIANT="st"
 RECONFIGURE=0
 
 for arg in "$@"; do
@@ -51,9 +54,12 @@ for arg in "$@"; do
         release|Release) BUILD_TYPE="release" ;;
         debug|Debug)     BUILD_TYPE="debug" ;;
         fast|Fast)       BUILD_TYPE="fast" ;;
+        st|ST)           VARIANT="st" ;;
+        mt|MT)           VARIANT="mt" ;;
+        all|ALL)         VARIANT="all" ;;
         --reconfigure)   RECONFIGURE=1 ;;
         *)
-            echo "Usage: $0 [release|debug|fast] [--reconfigure]"
+            echo "Usage: $0 [release|debug|fast] [st|mt|all] [--reconfigure]"
             exit 1
             ;;
     esac
@@ -74,13 +80,15 @@ else
     OCCT_CACHE_ROOT="${HOME}/.cache/occt-kernel-wasm"
 fi
 OCCT_INSTALL_DIR="${OCCT_CACHE_ROOT}/${OCCT_VERSION}/i"
-WASM_BUILD_DIR="${REPO_ROOT}/build-wasm-${CMAKE_BUILD_TYPE,,}"
 
-if [ ! -d "${OCCT_INSTALL_DIR}" ]; then
-    echo "[build-wasm] OCCT not found at ${OCCT_INSTALL_DIR}"
-    echo "             Run scripts/build-occt.sh first."
-    exit 1
-fi
+resolve_occt_install_dir() {
+    local variant_name="$1"
+    if [ "${variant_name}" = "mt" ]; then
+        printf '%s\n' "${OCCT_CACHE_ROOT}/${OCCT_VERSION}/i-mt"
+        return
+    fi
+    printf '%s\n' "${OCCT_INSTALL_DIR}"
+}
 
 # Locate Emscripten toolchain
 EMSCRIPTEN_TOOLCHAIN=""
@@ -95,27 +103,77 @@ if [ -z "${EMSCRIPTEN_TOOLCHAIN}" ] || [ ! -f "${EMSCRIPTEN_TOOLCHAIN}" ]; then
     exit 1
 fi
 
-mkdir -p "${WASM_BUILD_DIR}"
+build_variant() {
+    local variant="$1"
+    local build_dir="${REPO_ROOT}/build-wasm-${CMAKE_BUILD_TYPE,,}-${variant}"
+    local artifact_basename="occt-kernel.${variant}"
+    local enable_pthreads="OFF"
+    local occt_install_dir
+    occt_install_dir="$(resolve_occt_install_dir "${variant}")"
+    if [ "${variant}" = "mt" ]; then
+        enable_pthreads="ON"
+    fi
 
-if [ ! -f "${WASM_BUILD_DIR}/CMakeCache.txt" ] || [ "${RECONFIGURE}" -eq 1 ] || ! grep -Fq "${OCCT_INSTALL_DIR}" "${WASM_BUILD_DIR}/CMakeCache.txt"; then
-    echo "[build-wasm] Configuring (${CMAKE_BUILD_TYPE})..."
-    emcmake cmake -S "${REPO_ROOT}" -B "${WASM_BUILD_DIR}" \
-        -DCMAKE_TOOLCHAIN_FILE="${EMSCRIPTEN_TOOLCHAIN}" \
-        -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
-        -DOCCT_KERNEL_WASM=ON \
-        -DOCCT_ROOT="${OCCT_INSTALL_DIR}" \
-        -G "Unix Makefiles"
-else
-    echo "[build-wasm] Reusing existing configure (${CMAKE_BUILD_TYPE})..."
+    if [ ! -d "${occt_install_dir}" ]; then
+        echo "[build-wasm] OCCT ${variant} install not found at ${occt_install_dir}"
+        echo "             Run scripts/build-occt.sh ${variant} first."
+        exit 1
+    fi
+
+    mkdir -p "${build_dir}"
+
+    if [ ! -f "${build_dir}/CMakeCache.txt" ] || [ "${RECONFIGURE}" -eq 1 ] || ! grep -Fq "${occt_install_dir}" "${build_dir}/CMakeCache.txt" || ! grep -Fq "${artifact_basename}" "${build_dir}/CMakeCache.txt"; then
+        echo "[build-wasm] Configuring (${CMAKE_BUILD_TYPE} / ${variant})..."
+        emcmake cmake -S "${REPO_ROOT}" -B "${build_dir}" \
+            -DCMAKE_TOOLCHAIN_FILE="${EMSCRIPTEN_TOOLCHAIN}" \
+            -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
+            -DOCCT_KERNEL_WASM=ON \
+            -DOCCT_ROOT="${occt_install_dir}" \
+            -DOCCT_KERNEL_ARTIFACT_BASENAME="${artifact_basename}" \
+            -DOCCT_KERNEL_ENABLE_PTHREADS="${enable_pthreads}" \
+            -G "Unix Makefiles"
+    else
+        echo "[build-wasm] Reusing existing configure (${CMAKE_BUILD_TYPE} / ${variant})..."
+    fi
+
+    CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
+    echo "[build-wasm] Building ${variant} with ${CPU_COUNT} parallel jobs..."
+    cmake --build "${build_dir}" --parallel "${CPU_COUNT}"
+}
+
+copy_st_aliases() {
+    if [ ! -f "${REPO_ROOT}/dist/occt-kernel.st.js" ] || [ ! -f "${REPO_ROOT}/dist/occt-kernel.st.wasm" ]; then
+        return
+    fi
+
+    cp -f "${REPO_ROOT}/dist/occt-kernel.st.js" "${REPO_ROOT}/dist/occt-kernel.js"
+    cp -f "${REPO_ROOT}/dist/occt-kernel.st.wasm" "${REPO_ROOT}/dist/occt-kernel.wasm"
+    if [ -f "${REPO_ROOT}/dist/occt-kernel.st.worker.js" ]; then
+        cp -f "${REPO_ROOT}/dist/occt-kernel.st.worker.js" "${REPO_ROOT}/dist/occt-kernel.worker.js"
+    fi
+}
+
+case "${VARIANT}" in
+    all)
+        build_variant st
+        build_variant mt
+        ;;
+    st|mt)
+        build_variant "${VARIANT}"
+        ;;
+esac
+
+if [ "${VARIANT}" = "st" ] || [ "${VARIANT}" = "all" ] || [ -f "${REPO_ROOT}/dist/occt-kernel.st.js" ]; then
+    copy_st_aliases
 fi
-
-CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
-echo "[build-wasm] Building with ${CPU_COUNT} parallel jobs..."
-cmake --build "${WASM_BUILD_DIR}" --parallel "${CPU_COUNT}"
 
 mkdir -p "${REPO_ROOT}/dist"
 
 echo ""
 echo "[build-wasm] Build complete."
-echo "             dist/occt-kernel.js"
-echo "             dist/occt-kernel.wasm"
+echo "             dist/occt-kernel.st.js"
+echo "             dist/occt-kernel.st.wasm"
+echo "             dist/occt-kernel.mt.js"
+echo "             dist/occt-kernel.mt.wasm"
+echo "             dist/occt-kernel.js (compat alias -> st)"
+echo "             dist/occt-kernel.wasm (compat alias -> st)"

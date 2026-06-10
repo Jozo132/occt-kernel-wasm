@@ -20,6 +20,13 @@ export * from './api';
 
 import type { OcctKernel, WasmModule } from './kernel';
 
+export type KernelVariant = 'st' | 'mt';
+
+export interface CreateKernelOptions {
+	wasmModule?: WasmModule;
+	variant?: KernelVariant;
+}
+
 /**
  * Create and initialise an {@link OcctKernel} instance.
  *
@@ -28,3 +35,4 @@ import type { OcctKernel, WasmModule } from './kernel';
  * surface at `dist/index.d.ts`.
  */
 export declare function createKernel(wasmModule?: WasmModule): Promise<OcctKernel>;
+export declare function createKernel(options?: CreateKernelOptions): Promise<OcctKernel>;

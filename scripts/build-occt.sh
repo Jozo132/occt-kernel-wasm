@@ -9,7 +9,7 @@
 #   - python3, git
 #
 # Usage:
-#   bash scripts/build-occt.sh
+#   bash scripts/build-occt.sh [st|mt|all] [--reconfigure]
 #
 # Output:
 #   ${OCCT_WASM_CACHE_ROOT:-~/.cache/occt-kernel-wasm}/<OCCT_VERSION>/i/  – OCCT installed for WASM (include/, lib/)
@@ -39,6 +39,22 @@ print_elapsed_time() {
 
 trap print_elapsed_time EXIT
 
+VARIANT="st"
+RECONFIGURE=0
+
+for arg in "$@"; do
+    case "$arg" in
+        st|single|single-thread) VARIANT="st" ;;
+        mt|pthread|threads|multi-thread) VARIANT="mt" ;;
+        all) VARIANT="all" ;;
+        --reconfigure) RECONFIGURE=1 ;;
+        *)
+            echo "[build-occt] ERROR: Unsupported argument '$arg'. Use st, mt, all, or --reconfigure."
+            exit 1
+            ;;
+    esac
+done
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -61,9 +77,84 @@ fi
 OCCT_VERSION_ROOT="${OCCT_CACHE_ROOT}/${OCCT_VERSION}"
 OCCT_SRC_DIR="${THIRD_PARTY_DIR}/occt-src"
 OCCT_VERSIONED_SRC_DIR="${OCCT_VERSION_ROOT}/src"
-OCCT_BUILD_DIR="${OCCT_VERSION_ROOT}/b"
-OCCT_INSTALL_DIR="${OCCT_VERSION_ROOT}/i"
 ACTIVE_OCCT_SRC_DIR=""
+
+resolve_variants() {
+    case "$1" in
+        all) echo "st mt" ;;
+        st|single|single-thread) echo "st" ;;
+        mt|pthread|threads|multi-thread) echo "mt" ;;
+        *)
+            echo "[build-occt] ERROR: Unsupported variant '$1'. Use st, mt, or all."
+            exit 1
+            ;;
+    esac
+}
+
+variant_paths() {
+    local variant_name="$1"
+    if [ "${variant_name}" = "mt" ]; then
+        printf '%s\n%s\n%s\n%s\n' "${OCCT_VERSION_ROOT}/b-mt" "${OCCT_VERSION_ROOT}/i-mt" "-pthread -msimd128" "-pthread -msimd128"
+        return
+    fi
+
+    printf '%s\n%s\n%s\n%s\n' "${OCCT_VERSION_ROOT}/b" "${OCCT_VERSION_ROOT}/i" "-msimd128" "-msimd128"
+}
+
+variant_signature() {
+    local variant_name="$1"
+    local source_root="$2"
+    local toolchain="$3"
+    local c_flags="$4"
+    local cxx_flags="$5"
+    printf 'variant=%s\nsource=%s\ntoolchain=%s\ntoolkits=%s\ncflags=%s\ncxxflags=%s\nbuildType=Release\nscriptSchema=occt-cache-v1' \
+        "${variant_name}" "${source_root}" "${toolchain}" "${OCCT_TOOLKITS}" "${c_flags}" "${cxx_flags}"
+}
+
+cache_contains_path() {
+    local cache_content="$1"
+    local path_value="$2"
+    local forward_path="${path_value//\\//}"
+    [[ "${cache_content}" == *"${path_value}"* ]] || [[ "${cache_content}" == *"${forward_path}"* ]]
+}
+
+variant_cache_matches() {
+    local build_dir="$1"
+    local install_dir="$2"
+    local source_root="$3"
+    local toolchain="$4"
+    local cache_file="${build_dir}/CMakeCache.txt"
+    local config_file="${install_dir}/lib/cmake/opencascade/OpenCASCADEConfig.cmake"
+    local cache_content
+
+    [ -f "${cache_file}" ] || return 1
+    [ -f "${config_file}" ] || return 1
+
+    cache_content="$(cat "${cache_file}")"
+    [[ "${cache_content}" == *"BUILD_ADDITIONAL_TOOLKITS:STRING=${OCCT_TOOLKITS}"* ]] || return 1
+    [[ "${cache_content}" == *"CMAKE_TOOLCHAIN_FILE:FILEPATH=${toolchain}"* ]] || [[ "${cache_content}" == *"CMAKE_TOOLCHAIN_FILE:UNINITIALIZED=${toolchain}"* ]] || cache_contains_path "${cache_content}" "${toolchain}" || return 1
+    [[ "${cache_content}" == *"INSTALL_DIR:PATH=${install_dir//\\//}"* ]] || cache_contains_path "${cache_content}" "${install_dir}" || return 1
+    cache_contains_path "${cache_content}" "${source_root}" || return 1
+}
+
+variant_ready() {
+    local build_dir="$1"
+    local install_dir="$2"
+    local signature="$3"
+    local stamp_file="${install_dir}/.occt-build-stamp"
+    local config_file="${install_dir}/lib/cmake/opencascade/OpenCASCADEConfig.cmake"
+
+    [ -f "${build_dir}/CMakeCache.txt" ] || return 1
+    [ -f "${config_file}" ] || return 1
+    [ -f "${stamp_file}" ] || return 1
+    [ "$(cat "${stamp_file}")" = "${signature}" ] || return 1
+}
+
+write_variant_stamp() {
+    local install_dir="$1"
+    local signature="$2"
+    printf '%s' "${signature}" > "${install_dir}/.occt-build-stamp"
+}
 
 mkdir -p "${THIRD_PARTY_DIR}"
 mkdir -p "${OCCT_VERSION_ROOT}"
@@ -141,12 +232,6 @@ fi
 # Configure with Emscripten
 # ---------------------------------------------------------------------------
 
-echo "[build-occt] Configuring OCCT for Emscripten..."
-mkdir -p "${OCCT_BUILD_DIR}"
-echo "[build-occt] Source cache: ${ACTIVE_OCCT_SRC_DIR}"
-echo "[build-occt] Build cache:  ${OCCT_BUILD_DIR}"
-echo "[build-occt] Install dir:  ${OCCT_INSTALL_DIR}"
-
 # Locate Emscripten toolchain file
 EMSCRIPTEN_TOOLCHAIN=""
 if command -v emcc &>/dev/null; then
@@ -160,42 +245,68 @@ if [ -z "${EMSCRIPTEN_TOOLCHAIN}" ] || [ ! -f "${EMSCRIPTEN_TOOLCHAIN}" ]; then
     exit 1
 fi
 
-emcmake cmake -S "${ACTIVE_OCCT_SRC_DIR}" -B "${OCCT_BUILD_DIR}" \
-    -DCMAKE_TOOLCHAIN_FILE="${EMSCRIPTEN_TOOLCHAIN}" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="${OCCT_INSTALL_DIR}" \
-    -DBUILD_LIBRARY_TYPE=Static \
-    -DBUILD_MODULE_FoundationClasses=OFF \
-    -DBUILD_MODULE_ModelingData=OFF \
-    -DBUILD_MODULE_ModelingAlgorithms=OFF \
-    -DBUILD_MODULE_DataExchange=OFF \
-    -DBUILD_MODULE_Visualization=OFF \
-    -DBUILD_MODULE_ApplicationFramework=OFF \
-    -DBUILD_MODULE_Draw=OFF \
-    -DBUILD_ADDITIONAL_TOOLKITS="${OCCT_TOOLKITS}" \
-    -DBUILD_USE_PCH=ON \
-    -DBUILD_SAMPLES_MFC=OFF \
-    -DBUILD_SAMPLES_QT=OFF \
-    -DUSE_FREETYPE=OFF \
-    -DUSE_TK=OFF \
-    -DUSE_GL2PS=OFF \
-    -DUSE_FREEIMAGE=OFF \
-    -DUSE_RAPIDJSON=OFF \
-    -DUSE_TBB=OFF \
-    -DUSE_VTK=OFF \
-    -G "Unix Makefiles"
+for variant_name in $(resolve_variants "${VARIANT}"); do
+    mapfile -t path_values < <(variant_paths "${variant_name}")
+    OCCT_BUILD_DIR="${path_values[0]}"
+    OCCT_INSTALL_DIR="${path_values[1]}"
+    OCCT_C_FLAGS="${path_values[2]}"
+    OCCT_CXX_FLAGS="${path_values[3]}"
+    VARIANT_SIGNATURE="$(variant_signature "${variant_name}" "${ACTIVE_OCCT_SRC_DIR}" "${EMSCRIPTEN_TOOLCHAIN}" "${OCCT_C_FLAGS}" "${OCCT_CXX_FLAGS}")"
 
-# ---------------------------------------------------------------------------
-# Build and install
-# ---------------------------------------------------------------------------
+    if [ "${RECONFIGURE}" -eq 0 ] && variant_ready "${OCCT_BUILD_DIR}" "${OCCT_INSTALL_DIR}" "${VARIANT_SIGNATURE}"; then
+        echo "[build-occt] Reusing cached OCCT ${variant_name} install at ${OCCT_INSTALL_DIR}"
+        continue
+    fi
 
-CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
-echo "[build-occt] Building OCCT with ${CPU_COUNT} parallel jobs..."
-cmake --build "${OCCT_BUILD_DIR}" --parallel "${CPU_COUNT}"
+    if [ "${RECONFIGURE}" -eq 0 ] && variant_cache_matches "${OCCT_BUILD_DIR}" "${OCCT_INSTALL_DIR}" "${ACTIVE_OCCT_SRC_DIR}" "${EMSCRIPTEN_TOOLCHAIN}"; then
+        write_variant_stamp "${OCCT_INSTALL_DIR}" "${VARIANT_SIGNATURE}"
+        echo "[build-occt] Adopted existing OCCT ${variant_name} cache at ${OCCT_INSTALL_DIR}"
+        continue
+    fi
 
-echo "[build-occt] Installing OCCT to ${OCCT_INSTALL_DIR}..."
-cmake --install "${OCCT_BUILD_DIR}"
+    echo "[build-occt] Configuring OCCT for Emscripten (${variant_name})..."
+    mkdir -p "${OCCT_BUILD_DIR}"
+    echo "[build-occt] Source cache: ${ACTIVE_OCCT_SRC_DIR}"
+    echo "[build-occt] Build cache:  ${OCCT_BUILD_DIR}"
+    echo "[build-occt] Install dir:  ${OCCT_INSTALL_DIR}"
+
+    emcmake cmake -S "${ACTIVE_OCCT_SRC_DIR}" -B "${OCCT_BUILD_DIR}" \
+        -DCMAKE_TOOLCHAIN_FILE="${EMSCRIPTEN_TOOLCHAIN}" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="${OCCT_INSTALL_DIR}" \
+        -DCMAKE_C_FLAGS="${OCCT_C_FLAGS}" \
+        -DCMAKE_CXX_FLAGS="${OCCT_CXX_FLAGS}" \
+        -DBUILD_LIBRARY_TYPE=Static \
+        -DBUILD_MODULE_FoundationClasses=OFF \
+        -DBUILD_MODULE_ModelingData=OFF \
+        -DBUILD_MODULE_ModelingAlgorithms=OFF \
+        -DBUILD_MODULE_DataExchange=OFF \
+        -DBUILD_MODULE_Visualization=OFF \
+        -DBUILD_MODULE_ApplicationFramework=OFF \
+        -DBUILD_MODULE_Draw=OFF \
+        -DBUILD_ADDITIONAL_TOOLKITS="${OCCT_TOOLKITS}" \
+        -DBUILD_USE_PCH=ON \
+        -DBUILD_SAMPLES_MFC=OFF \
+        -DBUILD_SAMPLES_QT=OFF \
+        -DUSE_FREETYPE=OFF \
+        -DUSE_TK=OFF \
+        -DUSE_GL2PS=OFF \
+        -DUSE_FREEIMAGE=OFF \
+        -DUSE_RAPIDJSON=OFF \
+        -DUSE_TBB=OFF \
+        -DUSE_VTK=OFF \
+        -G "Unix Makefiles"
+
+    CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
+    echo "[build-occt] Building OCCT ${variant_name} with ${CPU_COUNT} parallel jobs..."
+    cmake --build "${OCCT_BUILD_DIR}" --parallel "${CPU_COUNT}"
+
+    echo "[build-occt] Installing OCCT ${variant_name} to ${OCCT_INSTALL_DIR}..."
+    cmake --install "${OCCT_BUILD_DIR}"
+
+    write_variant_stamp "${OCCT_INSTALL_DIR}" "${VARIANT_SIGNATURE}"
+done
 
 echo ""
-echo "[build-occt] Done. OCCT for WASM installed at: ${OCCT_INSTALL_DIR}"
-echo "             Pass -DOCCT_ROOT=${OCCT_INSTALL_DIR} to the WASM CMake build."
+echo "[build-occt] Done. OCCT for WASM installed under: ${OCCT_VERSION_ROOT}"
+echo "             Use ${OCCT_VERSION_ROOT}/i for st and ${OCCT_VERSION_ROOT}/i-mt for mt."

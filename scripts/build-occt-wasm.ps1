@@ -1,4 +1,10 @@
 # Build OCCT for WebAssembly (Emscripten)
+param(
+    [ValidateSet("st", "mt", "all", "single", "single-thread", "pthread", "threads", "multi-thread")]
+    [string]$Variant = "st",
+    [switch]$Reconfigure
+)
+
 $ErrorActionPreference = "Stop"
 
 function Format-ElapsedTime {
@@ -85,6 +91,131 @@ function Ensure-OcctSource {
     return $FallbackSource
 }
 
+function Resolve-VariantNames {
+    param([string]$Requested)
+
+    switch ($Requested.ToLowerInvariant()) {
+        "all" { return @("st", "mt") }
+        "single" { return @("st") }
+        "single-thread" { return @("st") }
+        "st" { return @("st") }
+        "pthread" { return @("mt") }
+        "threads" { return @("mt") }
+        "multi-thread" { return @("mt") }
+        "mt" { return @("mt") }
+        default { throw "Unsupported variant: $Requested" }
+    }
+}
+
+function Get-OcctVariantPaths {
+    param(
+        [string]$VariantName,
+        [string]$VersionRoot
+    )
+
+    if ($VariantName -eq "mt") {
+        return @{
+            Build = Join-Path $VersionRoot "b-mt"
+            Install = Join-Path $VersionRoot "i-mt"
+            CFlags = "-pthread -msimd128"
+            CxxFlags = "-pthread -msimd128"
+        }
+    }
+
+    return @{
+        Build = Join-Path $VersionRoot "b"
+        Install = Join-Path $VersionRoot "i"
+        CFlags = "-msimd128"
+        CxxFlags = "-msimd128"
+    }
+}
+
+function Get-OcctVariantSignature {
+    param(
+        [string]$VariantName,
+        [string]$SourceRoot,
+        [string]$Toolchain,
+        [string]$Toolkits,
+        [hashtable]$VariantPaths
+    )
+
+    return @(
+        "variant=$VariantName",
+        "source=$SourceRoot",
+        "toolchain=$Toolchain",
+        "toolkits=$Toolkits",
+        "cflags=$($VariantPaths.CFlags)",
+        "cxxflags=$($VariantPaths.CxxFlags)",
+        "buildType=Release",
+        "scriptSchema=occt-cache-v1"
+    ) -join "`n"
+}
+
+function Test-CacheContainsPath {
+    param(
+        [string]$CacheContent,
+        [string]$PathValue
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return $false
+    }
+
+    $forwardSlashes = $PathValue.Replace("\", "/")
+    return $CacheContent.Contains($PathValue) -or $CacheContent.Contains($forwardSlashes)
+}
+
+function Test-OcctVariantCacheMatches {
+    param(
+        [string]$BuildDir,
+        [string]$InstallDir,
+        [string]$SourceRoot,
+        [string]$Toolchain,
+        [string]$Toolkits
+    )
+
+    $cacheFile = Join-Path $BuildDir "CMakeCache.txt"
+    $configFile = Join-Path $InstallDir "lib\cmake\opencascade\OpenCASCADEConfig.cmake"
+    if (-not (Test-Path $cacheFile) -or -not (Test-Path $configFile)) {
+        return $false
+    }
+
+    $cacheContent = Get-Content $cacheFile -Raw
+    $toolchainMatches = $cacheContent.Contains("CMAKE_TOOLCHAIN_FILE:FILEPATH=$Toolchain") -or $cacheContent.Contains("CMAKE_TOOLCHAIN_FILE:UNINITIALIZED=$Toolchain") -or (Test-CacheContainsPath -CacheContent $cacheContent -PathValue $Toolchain)
+    $toolkitsMatches = $cacheContent.Contains("BUILD_ADDITIONAL_TOOLKITS:STRING=$Toolkits")
+    $installMatches = $cacheContent.Contains("INSTALL_DIR:PATH=$($InstallDir.Replace("\", "/"))") -or (Test-CacheContainsPath -CacheContent $cacheContent -PathValue $InstallDir)
+    $sourceMatches = Test-CacheContainsPath -CacheContent $cacheContent -PathValue $SourceRoot
+
+    return $toolchainMatches -and $toolkitsMatches -and $installMatches -and $sourceMatches
+}
+
+function Test-OcctVariantReady {
+    param(
+        [string]$BuildDir,
+        [string]$InstallDir,
+        [string]$Signature
+    )
+
+    $cacheFile = Join-Path $BuildDir "CMakeCache.txt"
+    $configFile = Join-Path $InstallDir "lib\cmake\opencascade\OpenCASCADEConfig.cmake"
+    $stampFile = Join-Path $InstallDir ".occt-build-stamp"
+
+    if (-not (Test-Path $cacheFile) -or -not (Test-Path $configFile) -or -not (Test-Path $stampFile)) {
+        return $false
+    }
+
+    return (Get-Content $stampFile -Raw) -eq $Signature
+}
+
+function Write-OcctVariantStamp {
+    param(
+        [string]$InstallDir,
+        [string]$Signature
+    )
+
+    Set-Content -Path (Join-Path $InstallDir ".occt-build-stamp") -Value $Signature -NoNewline
+}
+
 $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 $REPO_ROOT = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -112,9 +243,6 @@ try {
     $OcctVersionRoot = Join-Path $OcctCacheRoot $OCCT_VERSION
     $OCCT_SRC = "$REPO_ROOT\third-party\occt-src"
     $OCCT_VERSIONED_SRC = Join-Path $OcctVersionRoot "src"
-    $OCCT_BUILD = Join-Path $OcctVersionRoot "b"
-    $OCCT_INSTALL = Join-Path $OcctVersionRoot "i"
-
     if (-not (Test-Path $TOOLCHAIN)) {
         Write-Error "Emscripten toolchain not found at $TOOLCHAIN"
         exit 1
@@ -124,58 +252,80 @@ try {
 
     $ActiveOcctSource = Ensure-OcctSource -PrimarySource $OCCT_SRC -FallbackSource $OCCT_VERSIONED_SRC -Tag $OCCT_VERSION -RepositoryUrl $OCCT_REPO
 
-    Write-Host "[build-occt] Configuring OCCT for Emscripten..."
-    Write-Host "[build-occt] Source cache: $ActiveOcctSource"
-    Write-Host "[build-occt] Build cache:  $OCCT_BUILD"
-    Write-Host "[build-occt] Install dir:  $OCCT_INSTALL"
-    New-Item -ItemType Directory -Force -Path $OCCT_BUILD | Out-Null
+    foreach ($variantName in (Resolve-VariantNames $Variant)) {
+        $variantPaths = Get-OcctVariantPaths -VariantName $variantName -VersionRoot $OcctVersionRoot
+        $occtBuild = $variantPaths.Build
+        $occtInstall = $variantPaths.Install
+        $variantSignature = Get-OcctVariantSignature -VariantName $variantName -SourceRoot $ActiveOcctSource -Toolchain $TOOLCHAIN -Toolkits $OCCT_TOOLKITS -VariantPaths $variantPaths
 
-    $cmakeArgs = @(
-        "-S", $ActiveOcctSource,
-        "-B", $OCCT_BUILD,
-        "-DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN",
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DCMAKE_INSTALL_PREFIX=$OCCT_INSTALL",
-        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
-        "-DCMAKE_MAKE_PROGRAM=ninja",
-        "-DBUILD_LIBRARY_TYPE=Static",
-        "-DBUILD_MODULE_FoundationClasses=OFF",
-        "-DBUILD_MODULE_ModelingData=OFF",
-        "-DBUILD_MODULE_ModelingAlgorithms=OFF",
-        "-DBUILD_MODULE_DataExchange=OFF",
-        "-DBUILD_MODULE_Visualization=OFF",
-        "-DBUILD_MODULE_ApplicationFramework=OFF",
-        "-DBUILD_MODULE_Draw=OFF",
-        "-DBUILD_ADDITIONAL_TOOLKITS=$OCCT_TOOLKITS",
-        "-DBUILD_USE_PCH=ON",
-        "-DBUILD_SAMPLES_MFC=OFF",
-        "-DBUILD_SAMPLES_QT=OFF",
-        "-DUSE_FREETYPE=OFF",
-        "-DUSE_TK=OFF",
-        "-DUSE_GL2PS=OFF",
-        "-DUSE_FREEIMAGE=OFF",
-        "-DUSE_RAPIDJSON=OFF",
-        "-DUSE_TBB=OFF",
-        "-DUSE_VTK=OFF",
-        "-DUSE_GLES2=OFF",
-        "-G", "Ninja"
-    )
+        if (-not $Reconfigure -and (Test-OcctVariantReady -BuildDir $occtBuild -InstallDir $occtInstall -Signature $variantSignature)) {
+            Write-Host "[build-occt] Reusing cached OCCT $variantName install at $occtInstall"
+            continue
+        }
 
-    & cmake @cmakeArgs
-    if ($LASTEXITCODE -ne 0) { Write-Error "CMake configure failed"; exit 1 }
+        if (-not $Reconfigure -and (Test-OcctVariantCacheMatches -BuildDir $occtBuild -InstallDir $occtInstall -SourceRoot $ActiveOcctSource -Toolchain $TOOLCHAIN -Toolkits $OCCT_TOOLKITS)) {
+            Write-OcctVariantStamp -InstallDir $occtInstall -Signature $variantSignature
+            Write-Host "[build-occt] Adopted existing OCCT $variantName cache at $occtInstall"
+            continue
+        }
 
-    $cpuCount = (Get-CimInstance Win32_Processor).NumberOfLogicalProcessors
-    if (-not $cpuCount) { $cpuCount = 4 }
-    Write-Host "[build-occt] Building with $cpuCount parallel jobs..."
+        Write-Host "[build-occt] Configuring OCCT for Emscripten ($variantName)..."
+        Write-Host "[build-occt] Source cache: $ActiveOcctSource"
+        Write-Host "[build-occt] Build cache:  $occtBuild"
+        Write-Host "[build-occt] Install dir:  $occtInstall"
+        New-Item -ItemType Directory -Force -Path $occtBuild | Out-Null
 
-    & cmake --build $OCCT_BUILD --parallel $cpuCount
-    if ($LASTEXITCODE -ne 0) { Write-Error "CMake build failed"; exit 1 }
+        $cmakeArgs = @(
+            "-S", $ActiveOcctSource,
+            "-B", $occtBuild,
+            "-DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_INSTALL_PREFIX=$occtInstall",
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+            "-DCMAKE_MAKE_PROGRAM=ninja",
+            "-DCMAKE_C_FLAGS=$($variantPaths.CFlags)",
+            "-DCMAKE_CXX_FLAGS=$($variantPaths.CxxFlags)",
+            "-DBUILD_LIBRARY_TYPE=Static",
+            "-DBUILD_MODULE_FoundationClasses=OFF",
+            "-DBUILD_MODULE_ModelingData=OFF",
+            "-DBUILD_MODULE_ModelingAlgorithms=OFF",
+            "-DBUILD_MODULE_DataExchange=OFF",
+            "-DBUILD_MODULE_Visualization=OFF",
+            "-DBUILD_MODULE_ApplicationFramework=OFF",
+            "-DBUILD_MODULE_Draw=OFF",
+            "-DBUILD_ADDITIONAL_TOOLKITS=$OCCT_TOOLKITS",
+            "-DBUILD_USE_PCH=ON",
+            "-DBUILD_SAMPLES_MFC=OFF",
+            "-DBUILD_SAMPLES_QT=OFF",
+            "-DUSE_FREETYPE=OFF",
+            "-DUSE_TK=OFF",
+            "-DUSE_GL2PS=OFF",
+            "-DUSE_FREEIMAGE=OFF",
+            "-DUSE_RAPIDJSON=OFF",
+            "-DUSE_TBB=OFF",
+            "-DUSE_VTK=OFF",
+            "-DUSE_GLES2=OFF",
+            "-G", "Ninja"
+        )
 
-    Write-Host "[build-occt] Installing to $OCCT_INSTALL..."
-    & cmake --install $OCCT_BUILD
-    if ($LASTEXITCODE -ne 0) { Write-Error "CMake install failed"; exit 1 }
+        & cmake @cmakeArgs
+        if ($LASTEXITCODE -ne 0) { Write-Error "CMake configure failed"; exit 1 }
 
-    Write-Host "[build-occt] OCCT build complete at $OCCT_INSTALL"
+        $cpuCount = (Get-CimInstance Win32_Processor).NumberOfLogicalProcessors
+        if (-not $cpuCount) { $cpuCount = 4 }
+        Write-Host "[build-occt] Building $variantName with $cpuCount parallel jobs..."
+
+        & cmake --build $occtBuild --parallel $cpuCount
+        if ($LASTEXITCODE -ne 0) { Write-Error "CMake build failed"; exit 1 }
+
+        Write-Host "[build-occt] Installing $variantName to $occtInstall..."
+        & cmake --install $occtBuild
+        if ($LASTEXITCODE -ne 0) { Write-Error "CMake install failed"; exit 1 }
+
+        Write-OcctVariantStamp -InstallDir $occtInstall -Signature $variantSignature
+
+        Write-Host "[build-occt] OCCT $variantName build complete at $occtInstall"
+    }
 }
 finally {
     $buildTimer.Stop()

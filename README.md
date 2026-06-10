@@ -820,8 +820,14 @@ npm install
 # 2. Build OCCT for Emscripten (dispatches to PowerShell on Windows)
 npm run build:occt
 
+# Optional: build the pthread OCCT cache only when you actually need it
+npm run build:occt:mt
+
 # 3. Build the WASM module
 npm run build:wasm
+
+# Optional: build both exported kernel variants once the mt OCCT cache exists
+npm run build:wasm:all
 
 # 4. Build the publishable dist/
 npm run build
@@ -833,9 +839,15 @@ The OCCT build scripts pin `V8_0_0` and keep the V8 source, build, and install t
 
 If the existing `third-party/occt-src` checkout has local changes, the build preserves it and uses the cached V8 checkout instead of overwriting that tree.
 
-For faster local iteration, use `npm run build:wasm:fast`. That uses a separate `Fast` CMake build with low optimization and no debug source maps, and the wrapper scripts reuse the existing CMake configure unless you explicitly request a reconfigure.
+For faster local iteration, use `npm run build:wasm:fast`. That builds only the single-threaded kernel with a separate `Fast` CMake build, low optimization, and no debug source maps, and the wrapper scripts reuse the existing CMake configure unless you explicitly request a reconfigure.
 
-Output: `dist/occt-kernel.js`, `dist/occt-kernel.wasm`, `dist/index.js`, `dist/index.mjs`, `dist/index.d.ts`
+`npm run build:wasm` now stays on the single-threaded `st` artifact by default so normal modelling work does not trigger an unnecessary threaded rebuild. Use `npm run build:wasm:all` when you explicitly need both exported kernel variants. The legacy `dist/occt-kernel.js` and `dist/occt-kernel.wasm` paths remain as compatibility aliases for the `st` build.
+
+The `mt` kernel must link against a separate OCCT cache built with pthread atomics, so its OCCT install lives at `.../V8_0_0/i-mt` instead of sharing the single-threaded `.../V8_0_0/i` archive set.
+
+The OCCT build scripts are cache-aware per variant. Once `st` or `mt` has been built successfully, rerunning the same command reuses the existing OCCT install instead of recompiling the whole dependency stack. Use `--reconfigure` only when you intentionally want to invalidate that cached OCCT variant.
+
+Output: `dist/occt-kernel.st.js`, `dist/occt-kernel.st.wasm`, `dist/occt-kernel.mt.js`, `dist/occt-kernel.mt.wasm`, `dist/occt-kernel.js`, `dist/occt-kernel.wasm`, `dist/index.js`, `dist/index.mjs`, `dist/index.d.ts`
 
 ---
 

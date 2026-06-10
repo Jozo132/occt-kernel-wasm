@@ -32,7 +32,7 @@ function printElapsedTime() {
 async function cleanDistArtifacts() {
     await mkdir(distDir, { recursive: true });
     const entries = await readdir(distDir, { withFileTypes: true });
-    const keepFiles = new Set(['occt-kernel.js', 'occt-kernel.wasm']);
+    const keepPattern = /^occt-kernel(?:\.(?:st|mt))?\.(?:js|wasm|worker\.js)$/;
 
     await Promise.all(
         entries.map(async (entry) => {
@@ -41,7 +41,7 @@ async function cleanDistArtifacts() {
             }
 
             const { name } = entry;
-            if (keepFiles.has(name)) {
+            if (keepPattern.test(name)) {
                 return;
             }
 

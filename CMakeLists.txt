@@ -21,6 +21,12 @@ endif()
 option(OCCT_KERNEL_WASM   "Build the Emscripten WASM target"    OFF)
 option(OCCT_KERNEL_NATIVE "Build the native shared-library target" OFF)
 option(OCCT_KERNEL_USE_MINIMAL_OCCT_LINK "Use a narrower OCCT link set for kernel targets" ON)
+option(OCCT_KERNEL_ENABLE_PTHREADS "Build the Emscripten kernel with pthread support" OFF)
+
+set(OCCT_KERNEL_ARTIFACT_BASENAME "occt-kernel"
+    CACHE STRING "Basename for emitted JS/WASM kernel artifacts")
+set(OCCT_KERNEL_PTHREAD_POOL_SIZE "4"
+    CACHE STRING "Default pthread pool size for the Emscripten kernel")
 
 set(OCCT_KERNEL_REQUIRED_COMPONENTS
     FoundationClasses
@@ -185,6 +191,14 @@ if(OCCT_KERNEL_WASM)
         target_link_options(occt-kernel PRIVATE "SHELL:${flag}")
     endforeach()
 
+    if(OCCT_KERNEL_ENABLE_PTHREADS)
+        target_compile_options(occt-kernel PRIVATE -pthread)
+        target_link_options(occt-kernel PRIVATE
+            "SHELL:-pthread"
+            "SHELL:-sPTHREAD_POOL_SIZE=${OCCT_KERNEL_PTHREAD_POOL_SIZE}"
+        )
+    endif()
+
     target_compile_options(occt-kernel
         PRIVATE
             "$<$<CONFIG:Release>:-O3>"
@@ -195,7 +209,7 @@ if(OCCT_KERNEL_WASM)
     # Output goes to dist/
     set_target_properties(occt-kernel PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/dist"
-        OUTPUT_NAME              "occt-kernel"
+        OUTPUT_NAME              "${OCCT_KERNEL_ARTIFACT_BASENAME}"
         SUFFIX                   ".js"
     )
 endif()

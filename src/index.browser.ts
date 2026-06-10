@@ -1,6 +1,7 @@
 import { KernelError } from './errors';
 import { unwrapFactory, type WasmModuleFactory } from './default-module';
 import { OcctKernel, type WasmModule } from './kernel';
+import type { CreateKernelOptions, KernelVariant } from './index';
 
 export * from './api';
 
@@ -9,23 +10,43 @@ declare global {
 }
 
 let browserFactoryPromise: Promise<WasmModuleFactory> | undefined;
+let browserFactoryVariant: KernelVariant | undefined;
+
+function normalizeCreateKernelInput(input?: WasmModule | CreateKernelOptions): CreateKernelOptions {
+    if (!input) {
+        return {};
+    }
+    if (typeof input === 'object' && ('variant' in input || 'wasmModule' in input)) {
+        return input as CreateKernelOptions;
+    }
+    return { wasmModule: input as WasmModule };
+}
+
+function normalizeKernelVariant(variant?: KernelVariant): KernelVariant {
+    return variant === 'mt' ? 'mt' : 'st';
+}
+
+function kernelBasename(variant: KernelVariant): string {
+    return variant === 'mt' ? 'occt-kernel.mt' : 'occt-kernel.st';
+}
 
 function getGlobalFactory(): WasmModuleFactory | undefined {
     return unwrapFactory((globalThis as { createOcctKernelModule?: unknown }).createOcctKernelModule);
 }
 
-async function loadBrowserFactory(): Promise<WasmModuleFactory> {
+async function loadBrowserFactory(variant: KernelVariant): Promise<WasmModuleFactory> {
     const existingFactory = getGlobalFactory();
-    if (existingFactory) {
+    if (existingFactory && browserFactoryVariant === variant) {
         return existingFactory;
     }
 
-    if (browserFactoryPromise) {
+    if (browserFactoryPromise && browserFactoryVariant === variant) {
         return browserFactoryPromise;
     }
 
+    browserFactoryVariant = variant;
     browserFactoryPromise = (async () => {
-        const scriptUrl = new URL('./occt-kernel.js', import.meta.url).href;
+        const scriptUrl = new URL(`./${kernelBasename(variant)}.js`, import.meta.url).href;
 
         if (typeof importScripts === 'function') {
             importScripts(scriptUrl);
@@ -82,10 +103,11 @@ async function loadBrowserFactory(): Promise<WasmModuleFactory> {
 }
 
 export async function createKernel(wasmModule?: WasmModule): Promise<OcctKernel> {
-    if (wasmModule) {
-        return new OcctKernel(wasmModule);
+    const options = normalizeCreateKernelInput(wasmModule);
+    if (options.wasmModule) {
+        return new OcctKernel(options.wasmModule);
     }
 
-    const mod = await (await loadBrowserFactory())();
+    const mod = await (await loadBrowserFactory(normalizeKernelVariant(options.variant)))();
     return new OcctKernel(mod);
 }
