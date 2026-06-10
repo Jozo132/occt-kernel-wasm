@@ -87,7 +87,7 @@ function Ensure-OcctSource {
 
 $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-$REPO_ROOT = "c:\Users\HP\OneDrive\Documents\C++ Projects\occt-kernel-wasm"
+$REPO_ROOT = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 
 $EMSDK_ROOT = "C:\Users\HP\OneDrive\Documents\node\WASM"
 $TOOLCHAIN = "$EMSDK_ROOT\upstream\emscripten\cmake\Modules\Platform\Emscripten.cmake"

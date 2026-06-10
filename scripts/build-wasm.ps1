@@ -21,7 +21,7 @@ function Format-ElapsedTime {
 
 $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-$REPO_ROOT = "c:\Users\HP\OneDrive\Documents\C++ Projects\occt-kernel-wasm"
+$REPO_ROOT = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $EMSDK_ROOT = "C:\Users\HP\OneDrive\Documents\node\WASM"
 $TOOLCHAIN = "$EMSDK_ROOT\upstream\emscripten\cmake\Modules\Platform\Emscripten.cmake"
 $OCCT_VERSION = "V8_0_0"
@@ -45,6 +45,7 @@ switch ($normalizedBuildType) {
 }
 
 $BUILD_DIR = "$REPO_ROOT\build-wasm-$normalizedBuildType"
+$requiresBuildDirReset = $false
 
 try {
     # Ensure emsdk Python 3 is used
@@ -61,9 +62,18 @@ try {
         if ($cacheContents -notmatch [regex]::Escape($OCCT_INSTALL)) {
             $needsConfigure = $true
         }
+        elseif ($cacheContents -notmatch [regex]::Escape($REPO_ROOT)) {
+            $needsConfigure = $true
+            $requiresBuildDirReset = $true
+        }
     }
 
     if ($needsConfigure) {
+        if ($Reconfigure -or $requiresBuildDirReset) {
+            Write-Host "[build-wasm] Resetting stale CMake cache metadata in $BUILD_DIR..."
+            Remove-Item -Force -ErrorAction SilentlyContinue $cacheFile
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $BUILD_DIR "CMakeFiles")
+        }
         Write-Host "[build-wasm] Configuring ($cmakeBuildType)..."
         $cmakeArgs = @(
             "-S", $REPO_ROOT,

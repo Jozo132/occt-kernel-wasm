@@ -2348,20 +2348,6 @@ std::vector<ResolvedFaceRef> resolveBlendOutputFaces(BlendBuilder& builder,
     const ShapeList& generatedFaces = builder.Generated(edge.edge);
     appendHistoryResultIndices(generatedFaces, resultFaces, TopAbs_FACE, finalFaceIds);
 
-    for (ShapeList::Iterator it(generatedFaces); it.More(); it.Next()) {
-        const TopoDS_Shape& generatedFace = it.Value();
-        if (generatedFace.IsNull() || generatedFace.ShapeType() != TopAbs_FACE) {
-            continue;
-        }
-
-        const std::vector<int> descendantFaceIds = historyResultIndices(builder, generatedFace, resultFaces, TopAbs_FACE);
-        for (int faceId : descendantFaceIds) {
-            if (std::find(finalFaceIds.begin(), finalFaceIds.end(), faceId) == finalFaceIds.end()) {
-                finalFaceIds.push_back(faceId);
-            }
-        }
-    }
-
     std::sort(finalFaceIds.begin(), finalFaceIds.end());
 
     std::vector<ResolvedFaceRef> resolvedFaces;
@@ -2438,11 +2424,14 @@ std::string makeBlendResultJson(OcctKernel* kernel,
         deletedEdges.push_back(edge.stableHash);
     }
 
+    const std::string revisionJson = kernel->getRevisionInfo(shapeId);
+    const std::string topologyJson = kernel->getTopology(shapeId);
+
     std::ostringstream result;
     result << '{';
     result << "\"shapeId\":" << shapeId << ',';
-    result << "\"revision\":" << kernel->getRevisionInfo(shapeId) << ',';
-    result << "\"topology\":" << kernel->getTopology(shapeId) << ',';
+    result << "\"revision\":" << revisionJson << ',';
+    result << "\"topology\":" << topologyJson << ',';
     result << "\"lineage\":{";
     result << "\"generated\":" << generatedFaces.str() << ',';
     result << "\"modified\":[],";
@@ -4038,6 +4027,7 @@ namespace {
 struct CanonicalBlendBasis {
     bool available = false;
     TopoDS_Shape shape;
+    NCollection_DataMap<TopoDS_Shape, TopoDS_Shape, TopTools_ShapeMapHasher> context;
     BRepTools_Modifier modifier;
 };
 
@@ -4053,8 +4043,7 @@ std::unique_ptr<CanonicalBlendBasis> makeCanonicalBlendBasis(const TopoDS_Shape&
         conversion->SetOffsetMode(true);
         conversion->SetPlaneMode(false);
 
-        NCollection_DataMap<TopoDS_Shape, TopoDS_Shape, TopTools_ShapeMapHasher> context;
-        const TopoDS_Shape converted = ShapeCustom::ApplyModifier(shape, conversion, context, basis->modifier);
+        const TopoDS_Shape converted = ShapeCustom::ApplyModifier(shape, conversion, basis->context, basis->modifier);
         if (converted.IsNull() || converted.IsSame(shape) || !basis->modifier.IsDone()) {
             return basis;
         }
@@ -4068,15 +4057,51 @@ std::unique_ptr<CanonicalBlendBasis> makeCanonicalBlendBasis(const TopoDS_Shape&
 
 // Maps a subshape of the original blend operand onto its counterpart in the
 // canonical basis. Subshapes untouched by the conversion map to themselves.
-TopoDS_Shape mapToCanonicalBasis(const BRepTools_Modifier& modifier, const TopoDS_Shape& shape) {
-    try {
-        const TopoDS_Shape& mapped = modifier.ModifiedShape(shape);
-        if (!mapped.IsNull()) {
-            return mapped;
+bool tryMapToCanonicalBasis(const CanonicalBlendBasis& basis,
+                           const TopoDS_Shape& shape,
+                           TopoDS_Shape& mappedShape) {
+    const auto mapWithOrientation = [&](const TopoDS_Shape& candidate) -> TopoDS_Shape {
+        if (basis.context.IsBound(candidate)) {
+            const TopoDS_Shape& mapped = basis.context.Find(candidate);
+            if (!mapped.IsNull()) {
+                return mapped.Oriented(shape.Orientation());
+            }
         }
-    } catch (const Standard_Failure&) {
-        // Shape was not part of the initial shape (e.g. builder-generated);
-        // treat it as unmapped.
+        try {
+            const TopoDS_Shape& mapped = basis.modifier.ModifiedShape(candidate);
+            if (!mapped.IsNull()) {
+                return mapped.Oriented(shape.Orientation());
+            }
+        } catch (const Standard_Failure&) {
+            // Shape was not part of the initial shape (e.g. builder-generated);
+            // treat it as unmapped.
+        }
+        return TopoDS_Shape();
+    };
+
+    const TopoDS_Shape exact = mapWithOrientation(shape);
+    if (!exact.IsNull()) {
+        mappedShape = exact;
+        return true;
+    }
+
+    const TopoDS_Shape forward = shape.Oriented(TopAbs_FORWARD);
+    if (!forward.IsSame(shape)) {
+        const TopoDS_Shape mappedForward = mapWithOrientation(forward);
+        if (!mappedForward.IsNull()) {
+            mappedShape = mappedForward;
+            return true;
+        }
+    }
+
+    mappedShape = shape;
+    return false;
+}
+
+TopoDS_Shape mapToCanonicalBasis(const CanonicalBlendBasis& basis, const TopoDS_Shape& shape) {
+    TopoDS_Shape mapped;
+    if (tryMapToCanonicalBasis(basis, shape, mapped)) {
+        return mapped;
     }
     return shape;
 }
@@ -4086,11 +4111,14 @@ TopoDS_Shape mapToCanonicalBasis(const BRepTools_Modifier& modifier, const TopoD
 // ORIGINAL operand subshapes even though the blend ran on the converted shape.
 template <typename Builder>
 struct CanonicalBlendHistory {
-    const BRepTools_Modifier& modifier;
+    const CanonicalBlendBasis& basis;
     Builder& builder;
 
     ShapeList Modified(const TopoDS_Shape& shape) {
-        const TopoDS_Shape mapped = mapToCanonicalBasis(modifier, shape);
+        TopoDS_Shape mapped;
+        if (!tryMapToCanonicalBasis(basis, shape, mapped)) {
+            return ShapeList();
+        }
         ShapeList list = builder.Modified(mapped);
         if (!mapped.IsSame(shape)) {
             // The conversion itself modified this subshape; if the blend then
@@ -4101,22 +4129,41 @@ struct CanonicalBlendHistory {
     }
 
     ShapeList Generated(const TopoDS_Shape& shape) {
-        return builder.Generated(mapToCanonicalBasis(modifier, shape));
+        TopoDS_Shape mapped;
+        if (!tryMapToCanonicalBasis(basis, shape, mapped)) {
+            return ShapeList();
+        }
+        return builder.Generated(mapped);
     }
 };
 
 // Re-resolved edge refs against the canonical basis: same identity (topoId and
 // stableHash are reported from the original resolution), converted TopoDS edge.
-std::vector<ResolvedEdgeRef> mapEdgeRefsToCanonicalBasis(const BRepTools_Modifier& modifier,
+std::vector<ResolvedEdgeRef> mapEdgeRefsToCanonicalBasis(const CanonicalBlendBasis& basis,
                                                          const std::vector<ResolvedEdgeRef>& edges) {
+    ShapeMap basisEdges;
+    TopExp::MapShapes(basis.shape, TopAbs_EDGE, basisEdges);
     std::vector<ResolvedEdgeRef> mapped;
     mapped.reserve(edges.size());
     for (const ResolvedEdgeRef& edge : edges) {
         ResolvedEdgeRef copy = edge;
-        copy.edge = TopoDS::Edge(mapToCanonicalBasis(modifier, edge.edge));
+        if (edge.topoId > 0 && edge.topoId <= basisEdges.Extent()) {
+            copy.edge = TopoDS::Edge(basisEdges(edge.topoId));
+        } else {
+            copy.edge = TopoDS::Edge(mapToCanonicalBasis(basis, edge.edge));
+        }
         mapped.push_back(copy);
     }
     return mapped;
+}
+
+TopoDS_Face mapFaceRefToCanonicalBasis(const CanonicalBlendBasis& basis, const ResolvedFaceRef& face) {
+    ShapeMap basisFaces;
+    TopExp::MapShapes(basis.shape, TopAbs_FACE, basisFaces);
+    if (face.topoId > 0 && face.topoId <= basisFaces.Extent()) {
+        return TopoDS::Face(basisFaces(face.topoId));
+    }
+    return TopoDS::Face(mapToCanonicalBasis(basis, face.face));
 }
 
 } // namespace
@@ -4405,7 +4452,7 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                                                blendBuilderDiagnosticsJson(mkFillet, appliedEdges));
         }
 
-        const std::vector<ResolvedEdgeRef> basisEdges = mapEdgeRefsToCanonicalBasis(basis->modifier, appliedEdges);
+        const std::vector<ResolvedEdgeRef> basisEdges = mapEdgeRefsToCanonicalBasis(*basis, appliedEdges);
         BRepFilletAPI_MakeFillet mkRetry(basis->shape, filletShape);
         mkRetry.SetContinuity(blendContinuity, angularTolerance);
         for (std::size_t i = 0; i < replayOps.size(); ++i) {
@@ -4433,12 +4480,16 @@ std::string OcctKernel::filletEdgesWithSpec(uint32_t id, const std::string& spec
                                                blendBuilderDiagnosticsJson(mkRetry, basisEdges));
         }
 
-        CanonicalBlendHistory<BRepFilletAPI_MakeFillet> composedHistory{ basis->modifier, mkRetry };
+        CanonicalBlendHistory<BRepFilletAPI_MakeFillet> composedHistory{ *basis, mkRetry };
         return finalizeFillet(composedHistory, mkRetry.Shape());
     } catch (const std::runtime_error&) {
         throw;
+    } catch (const std::exception& ex) {
+        throwStructuredOperationError(operation, ex.what());
     } catch (const Standard_Failure& sf) {
         throwStructuredOperationError(operation, sf.what());
+    } catch (...) {
+        throwStructuredOperationError(operation, "Unknown native exception");
     }
     return "{}";
 }
@@ -4703,7 +4754,7 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                                                blendBuilderDiagnosticsJson(mkChamfer, appliedEdges));
         }
 
-        const std::vector<ResolvedEdgeRef> basisEdges = mapEdgeRefsToCanonicalBasis(basis->modifier, appliedEdges);
+        const std::vector<ResolvedEdgeRef> basisEdges = mapEdgeRefsToCanonicalBasis(*basis, appliedEdges);
         BRepFilletAPI_MakeChamfer mkRetry(basis->shape);
         std::string retryFailureReason;
         for (std::size_t i = 0; i < replayOps.size() && retryFailureReason.empty(); ++i) {
@@ -4711,7 +4762,7 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
             const TopoDS_Edge& edge = basisEdges[i].edge;
             TopoDS_Face mappedFace;
             if (op.kind != 0) {
-                mappedFace = TopoDS::Face(mapToCanonicalBasis(basis->modifier, op.referenceFace));
+                mappedFace = TopoDS::Face(mapToCanonicalBasis(*basis, op.referenceFace));
             }
             if (op.kind == 0) {
                 mkRetry.Add(op.value1, edge);
@@ -4752,12 +4803,16 @@ std::string OcctKernel::chamferEdgesWithSpec(uint32_t id, const std::string& spe
                                                blendBuilderDiagnosticsJson(mkRetry, basisEdges));
         }
 
-        CanonicalBlendHistory<BRepFilletAPI_MakeChamfer> composedHistory{ basis->modifier, mkRetry };
+        CanonicalBlendHistory<BRepFilletAPI_MakeChamfer> composedHistory{ *basis, mkRetry };
         return finalizeChamfer(composedHistory, mkRetry.Shape());
     } catch (const std::runtime_error&) {
         throw;
+    } catch (const std::exception& ex) {
+        throwStructuredOperationError(operation, ex.what());
     } catch (const Standard_Failure& sf) {
         throwStructuredOperationError(operation, sf.what());
+    } catch (...) {
+        throwStructuredOperationError(operation, "Unknown native exception");
     }
     return "{}";
 }
