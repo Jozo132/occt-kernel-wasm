@@ -145,12 +145,15 @@ vite.config.ts.timestamp-*
 # CMake build directories
 build-wasm-release/
 build-wasm-debug/
+build-wasm-*/
 build-native-release/
 build-native-debug/
 build-native/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
+.ninja_*
+build.ninja
 
 # WASM output (committed only when releasing a pre-built binary)
 dist/*.js
@@ -167,5 +170,3 @@ third-party/occt-wasm-*/
 
 # Emscripten cache
 .emscripten_cache/
-build-wasm-fast*/.ninja_*
-build-wasm-fast*/build.ninja
