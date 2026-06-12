@@ -16,10 +16,17 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
     },
+    "./sketch-toolkit": {
+      "types": "./dist/sketch-toolkit.d.ts",
+      "import": "./dist/sketch-toolkit.mjs",
+      "require": "./dist/sketch-toolkit.js"
+    },
     "./occt-kernel.st.js": "./dist/occt-kernel.st.js",
     "./occt-kernel.st.wasm": "./dist/occt-kernel.st.wasm",
     "./occt-kernel.mt.js": "./dist/occt-kernel.mt.js",
     "./occt-kernel.mt.wasm": "./dist/occt-kernel.mt.wasm",
+    "./sketch-toolkit.wasm.js": "./dist/sketch-toolkit.wasm.js",
+    "./sketch-toolkit.wasm": "./dist/sketch-toolkit.wasm.wasm",
     "./occt-kernel.js": "./dist/occt-kernel.js",
     "./occt-kernel.wasm": "./dist/occt-kernel.wasm"
   },
@@ -38,6 +45,9 @@
     "build:wasm:all": "node scripts/run-platform-build.mjs wasm release all",
     "build:wasm:fast": "node scripts/run-platform-build.mjs wasm fast st",
     "build:wasm:fast:all": "node scripts/run-platform-build.mjs wasm fast all",
+    "build:sketch": "node scripts/run-platform-build.mjs sketch release",
+    "build:sketch:debug": "node scripts/run-platform-build.mjs sketch debug",
+    "build:sketch:fast": "node scripts/run-platform-build.mjs sketch fast",
     "build:occt": "node scripts/run-platform-build.mjs occt st",
     "build:occt:st": "node scripts/run-platform-build.mjs occt st",
     "build:occt:mt": "node scripts/run-platform-build.mjs occt mt",

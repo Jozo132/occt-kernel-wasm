@@ -7,7 +7,7 @@
     "rootDir": "src",
     "sourceMap": false
   },
-  "files": ["src/index.ts"],
-  "include": ["src/index.ts"],
+  "files": ["src/index.ts", "src/sketch-toolkit.ts"],
+  "include": ["src/index.ts", "src/sketch-toolkit.ts"],
   "exclude": ["node_modules", "dist", "tests", "examples", "src/index.browser.ts", "src/index.node.ts"]
 }

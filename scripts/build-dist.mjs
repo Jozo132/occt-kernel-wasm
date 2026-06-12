@@ -32,7 +32,7 @@ function printElapsedTime() {
 async function cleanDistArtifacts() {
     await mkdir(distDir, { recursive: true });
     const entries = await readdir(distDir, { withFileTypes: true });
-    const keepPattern = /^occt-kernel(?:\.(?:st|mt))?\.(?:js|wasm|worker\.js)$/;
+    const keepPattern = /^(?:occt-kernel(?:\.(?:st|mt))?|sketch-toolkit\.wasm)\.(?:js|wasm|worker\.js)$/;
 
     await Promise.all(
         entries.map(async (entry) => {
@@ -76,6 +76,24 @@ try {
             bundle: true,
             format: 'esm',
             outfile: path.join(distDir, 'index.mjs'),
+            platform: 'browser',
+            sourcemap: true,
+            target: ['es2020'],
+        }),
+        build({
+            entryPoints: [path.join(repoRoot, 'src', 'sketch-toolkit.node.ts')],
+            bundle: true,
+            format: 'cjs',
+            outfile: path.join(distDir, 'sketch-toolkit.js'),
+            platform: 'node',
+            sourcemap: true,
+            target: ['node18'],
+        }),
+        build({
+            entryPoints: [path.join(repoRoot, 'src', 'sketch-toolkit.browser.ts')],
+            bundle: true,
+            format: 'esm',
+            outfile: path.join(distDir, 'sketch-toolkit.mjs'),
             platform: 'browser',
             sourcemap: true,
             target: ['es2020'],

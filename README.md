@@ -2,6 +2,10 @@
 
 Reusable OCCT-based CAD kernel for WebAssembly with a small TypeScript API for exact solid modeling.
 
+The repository also contains an in-progress `sketch-toolkit` WASM target for the next
+generation 2D sketch solver. It builds separately from the OCCT target so sketch work
+does not require a full OCCT rebuild.
+
 [![CI](https://github.com/Jozo132/occt-kernel-wasm/actions/workflows/ci.yml/badge.svg)](https://github.com/Jozo132/occt-kernel-wasm/actions/workflows/ci.yml)
 
 ---
@@ -47,6 +51,12 @@ npm install occt-kernel-wasm
 ```
 
 > **Note:** The npm package ships with a pre-compiled WASM binary. If you need to rebuild against a different OCCT version, see [Building from source](#building-from-source).
+
+## Additional WASM targets
+
+- `npm run build:sketch` builds the in-progress `dist/sketch-toolkit.wasm.js` and
+    `dist/sketch-toolkit.wasm` artifacts.
+- `npm run build:wasm` still builds the OCCT-backed exact modelling target.
 
 ---
 

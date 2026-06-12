@@ -6,6 +6,11 @@
 Technology (OCCT). It exposes a stable, domain-oriented API for exact solid modelling
 in browser and Node.js environments, without leaking any OCCT types into JavaScript.
 
+The next major subsystem is a kernel-adjacent 2D sketch toolkit built as a second WASM
+target inside this repository. It ships from the same package, but builds separately
+from the OCCT target so sketch work does not force a full OCCT rebuild. The dedicated
+design lives in `SKETCH_SOLVER_ARCHITECTURE.md`.
+
 ---
 
 ## Layer Diagram

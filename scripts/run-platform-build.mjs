@@ -9,6 +9,10 @@ const targets = {
         windows: 'build-occt-wasm.ps1',
         other: 'build-occt.sh',
     },
+    sketch: {
+        windows: 'build-sketch-toolkit.ps1',
+        other: 'build-sketch-toolkit.sh',
+    },
     wasm: {
         windows: 'build-wasm.ps1',
         other: 'build-wasm.sh',
@@ -17,7 +21,7 @@ const targets = {
 
 const [target, ...forwardedArgs] = process.argv.slice(2);
 if (!target || !(target in targets)) {
-    console.error("Usage: node scripts/run-platform-build.mjs <occt|wasm> [...args]");
+    console.error("Usage: node scripts/run-platform-build.mjs <occt|wasm|sketch> [...args]");
     process.exit(1);
 }
 
