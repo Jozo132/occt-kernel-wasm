@@ -839,11 +839,17 @@ npm run build:wasm
 # Optional: build both exported kernel variants once the mt OCCT cache exists
 npm run build:wasm:all
 
+# 3b. Build the mandatory sketch toolkit runtime used by modeller
+npm run build:sketch
+
 # 4. Build the publishable dist/
 npm run build
+
+# Or build every OCCT + WASM + sketch artifact in one go
+npm run build:all
 ```
 
-On Windows, `npm run build:occt` and `npm run build:wasm` use the PowerShell wrappers in `scripts/` so the local Emscripten `.bat` entrypoints are used directly.
+On Windows, `npm run build:occt`, `npm run build:wasm`, and `npm run build:sketch` use the PowerShell wrappers in `scripts/` so the local Emscripten `.bat` entrypoints are used directly.
 
 The OCCT build scripts pin `V8_0_0` and keep the V8 source, build, and install trees in a versioned local cache outside the workspace by default. On Windows that defaults to `%LOCALAPPDATA%\occt-kernel-wasm\V8_0_0`; on Unix-like systems it defaults to `$XDG_CACHE_HOME/occt-kernel-wasm/V8_0_0` or `~/.cache/occt-kernel-wasm/V8_0_0`. Set `OCCT_WASM_CACHE_ROOT` to override that location.
 
@@ -851,7 +857,11 @@ If the existing `third-party/occt-src` checkout has local changes, the build pre
 
 For faster local iteration, use `npm run build:wasm:fast`. That builds only the single-threaded kernel with a separate `Fast` CMake build, low optimization, and no debug source maps, and the wrapper scripts reuse the existing CMake configure unless you explicitly request a reconfigure.
 
-`npm run build:wasm` now stays on the single-threaded `st` artifact by default so normal modelling work does not trigger an unnecessary threaded rebuild. Use `npm run build:wasm:all` when you explicitly need both exported kernel variants. The legacy `dist/occt-kernel.js` and `dist/occt-kernel.wasm` paths remain as compatibility aliases for the `st` build.
+`npm run build:wasm` now stays on the single-threaded `st` artifact by default so normal modelling work does not trigger an unnecessary threaded rebuild. Use `npm run build:wasm:all` when you explicitly need both exported kernel variants.
+
+`npm run build:sketch` emits the mandatory `dist/sketch-toolkit.wasm.js` and `dist/sketch-toolkit.wasm.wasm` browser runtime files used by `modeller`.
+
+`npm run build:all` produces the OCCT `st` and `mt` caches, both exported kernel variants, the sketch toolkit runtime, and the publishable TypeScript entrypoints in one pass. The legacy `dist/occt-kernel.js` and `dist/occt-kernel.wasm` paths remain as compatibility aliases for the `st` build.
 
 The `mt` kernel must link against a separate OCCT cache built with pthread atomics, so its OCCT install lives at `.../V8_0_0/i-mt` instead of sharing the single-threaded `.../V8_0_0/i` archive set.
 

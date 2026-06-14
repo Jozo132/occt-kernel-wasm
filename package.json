@@ -39,6 +39,7 @@
   ],
   "scripts": {
     "build": "node scripts/build-dist.mjs",
+    "build:all": "npm run build:occt:all && npm run build:wasm:all && npm run build:sketch && npm run build",
     "build:wasm": "node scripts/run-platform-build.mjs wasm release st",
     "build:wasm:st": "node scripts/run-platform-build.mjs wasm release st",
     "build:wasm:mt": "node scripts/run-platform-build.mjs wasm release mt",
@@ -58,7 +59,7 @@
     "test:coverage": "jest --coverage",
     "lint": "tsc --project tsconfig.check.json",
     "pack:check": "npm pack --dry-run",
-    "prepublishOnly": "npm run build && npm run pack:check"
+    "prepublishOnly": "npm run build:sketch && npm run build && npm run pack:check"
   },
   "keywords": [
     "occt",
