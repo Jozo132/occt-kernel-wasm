@@ -93,8 +93,16 @@ resolve_occt_install_dir() {
 # Locate Emscripten toolchain
 EMSCRIPTEN_TOOLCHAIN=""
 if command -v emcc &>/dev/null; then
-    EMSDK_ROOT="$(dirname "$(dirname "$(command -v emcc)")")"
-    EMSCRIPTEN_TOOLCHAIN="${EMSDK_ROOT}/cmake/Modules/Platform/Emscripten.cmake"
+    EMCC_DIR="$(dirname "$(command -v emcc)")"
+    for candidate in \
+        "${EMCC_DIR}/cmake/Modules/Platform/Emscripten.cmake" \
+        "$(dirname "${EMCC_DIR}")/cmake/Modules/Platform/Emscripten.cmake" \
+        "/usr/share/emscripten/cmake/Modules/Platform/Emscripten.cmake"; do
+        if [ -f "${candidate}" ]; then
+            EMSCRIPTEN_TOOLCHAIN="${candidate}"
+            break
+        fi
+    done
 fi
 
 if [ -z "${EMSCRIPTEN_TOOLCHAIN}" ] || [ ! -f "${EMSCRIPTEN_TOOLCHAIN}" ]; then

@@ -63,13 +63,22 @@ set(OCCT_KERNEL_MINIMAL_OCCT_LIBRARIES
 # OCCT dependency
 # ---------------------------------------------------------------------------
 
-# The caller must set OCCT_ROOT to the directory that contains
-# OCCTConfig.cmake (or OpenCASCADEConfig.cmake).
+# The caller may set OCCT_ROOT to either the OCCT install prefix or directly to
+# the directory that contains OCCTConfig.cmake / OpenCASCADEConfig.cmake.
 # When building with Emscripten, this should point to the Emscripten build of OCCT.
 # When building natively, this should point to the host build of OCCT.
 
 if(DEFINED OCCT_ROOT)
     list(APPEND CMAKE_PREFIX_PATH "${OCCT_ROOT}")
+    list(APPEND CMAKE_PREFIX_PATH
+        "${OCCT_ROOT}/lib/cmake/opencascade"
+        "${OCCT_ROOT}/lib64/cmake/opencascade"
+    )
+    if(EXISTS "${OCCT_ROOT}/lib/cmake/opencascade/OpenCASCADEConfig.cmake")
+        set(OpenCASCADE_DIR "${OCCT_ROOT}/lib/cmake/opencascade")
+    elseif(EXISTS "${OCCT_ROOT}/lib64/cmake/opencascade/OpenCASCADEConfig.cmake")
+        set(OpenCASCADE_DIR "${OCCT_ROOT}/lib64/cmake/opencascade")
+    endif()
 endif()
 
 find_package(OpenCASCADE QUIET
