@@ -977,6 +977,23 @@ describe('exact subshape evaluation APIs', () => {
         expect(evaluated.point).toEqual([0.25, 0.75, 0]);
         expect(evaluated.normal).toEqual([0, 0, 1]);
     });
+
+    it('returns exact trimmed planar face wires without tessellation', () => {
+        const k = makeKernel();
+        const box = k.createBox({ dx: 10, dy: 10, dz: 10 });
+
+        const trimmed = k.getPlanarFaceWires({ shape: box, face: { topoId: 1 } });
+
+        expect(trimmed.surfaceType).toBe('plane');
+        expect(trimmed.plane.normal).toEqual([0, 0, 1]);
+        expect(trimmed.wires).toHaveLength(1);
+        expect(trimmed.wires[0].kind).toBe('outer');
+        expect(trimmed.wires[0].segments).toHaveLength(4);
+        expect(trimmed.wires[0].segments[0].edge.topoId).toBe(1);
+        expect(trimmed.wires[0].segments[0].planarCurve.curveType).toBe('line');
+        expect(trimmed.wires[0].segments[0].planarCurve.line?.direction).toEqual([1, 0]);
+        expect(trimmed.wires[0].segments[0].spatialCurve.line?.direction).toEqual([1, 0, 0]);
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -1086,6 +1103,7 @@ describe('getCapabilities', () => {
         expect(capabilities.fillet?.partialEdges).toBe(false);
         expect(capabilities.chamfer?.distanceAngle).toBe(true);
         expect(capabilities.subshapeEvaluation?.evaluateEdge).toBe(true);
+        expect(capabilities.subshapeEvaluation?.getPlanarFaceWires).toBe(true);
         expect(capabilities.analysis?.volume).toBe(true);
         expect(capabilities.analysis?.pointContainment).toBe(true);
         expect(capabilities.runtime?.worker).toBe(true);
@@ -1110,6 +1128,7 @@ describe('getCapabilities', () => {
         expect(schema.operations.findClosestPointOnShape).toBeDefined();
         expect(schema.operations.measureShapeDistance).toBeDefined();
         expect(schema.operations.evaluateFace).toBeDefined();
+        expect(schema.operations.getPlanarFaceWires).toBeDefined();
     });
 });
 

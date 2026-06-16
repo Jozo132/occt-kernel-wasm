@@ -1670,6 +1670,68 @@ export class MockNativeKernel {
         });
     }
 
+    getPlanarFaceWires(id: number, faceRefJson: string): string {
+        this._require(id);
+        const faceRef = JSON.parse(faceRefJson) as Record<string, unknown>;
+        this._validateRef(faceRef, 'faceRef');
+        const resolvedFace = { topoId: faceRef.topoId ?? 1, stableHash: faceRef.stableHash ?? 'F:mock_face_1' };
+        const makeLineSegment = (
+            edgeId: number,
+            start2d: [number, number],
+            mid2d: [number, number],
+            end2d: [number, number],
+            start3d: [number, number, number],
+            mid3d: [number, number, number],
+            end3d: [number, number, number],
+            direction2d: [number, number],
+            direction3d: [number, number, number],
+        ) => ({
+            edge: { topoId: edgeId, stableHash: `E:mock_edge_${edgeId}` },
+            orientation: 'forward' as const,
+            planarCurve: {
+                curveType: 'line',
+                domain: { first: 0, last: 1 },
+                trim: { first: 0, last: 1, normalizedFirst: 0, normalizedLast: 1 },
+                startPoint: start2d,
+                midPoint: mid2d,
+                endPoint: end2d,
+                line: { origin: start2d, direction: direction2d },
+            },
+            spatialCurve: {
+                curveType: 'line',
+                domain: { first: 0, last: 1 },
+                trim: { first: 0, last: 1, normalizedFirst: 0, normalizedLast: 1 },
+                startPoint: start3d,
+                midPoint: mid3d,
+                endPoint: end3d,
+                line: { origin: start3d, direction: direction3d },
+            },
+        });
+
+        return JSON.stringify({
+            face: resolvedFace,
+            surfaceType: 'plane',
+            plane: {
+                origin: [0, 0, 0],
+                normal: [0, 0, 1],
+                xDirection: [1, 0, 0],
+            },
+            domain: {
+                u: [0, 1],
+                v: [0, 1],
+            },
+            wires: [{
+                kind: 'outer',
+                segments: [
+                    makeLineSegment(1, [0, 0], [0.5, 0], [1, 0], [0, 0, 0], [0.5, 0, 0], [1, 0, 0], [1, 0], [1, 0, 0]),
+                    makeLineSegment(2, [1, 0], [1, 0.5], [1, 1], [1, 0, 0], [1, 0.5, 0], [1, 1, 0], [0, 1], [0, 1, 0]),
+                    makeLineSegment(3, [1, 1], [0.5, 1], [0, 1], [1, 1, 0], [0.5, 1, 0], [0, 1, 0], [-1, 0], [-1, 0, 0]),
+                    makeLineSegment(4, [0, 1], [0, 0.5], [0, 0], [0, 1, 0], [0, 0.5, 0], [0, 0, 0], [0, -1], [0, -1, 0]),
+                ],
+            }],
+        });
+    }
+
     getOperationSchema(): string {
         return JSON.stringify({
             schemaVersion: 1,
@@ -1782,6 +1844,7 @@ export class MockNativeKernel {
                 sampleEdge: { schemaVersion: 1, nativeExact: true },
                 getEdgeCurve: { schemaVersion: 1, nativeExact: true },
                 evaluateFace: { schemaVersion: 1, nativeExact: true },
+                getPlanarFaceWires: { schemaVersion: 1, nativeExact: true, planarFacesOnly: true, returnsLocalAndWorldWires: true },
             },
         });
     }
@@ -1922,6 +1985,7 @@ export class MockNativeKernel {
                 sampleEdge: true,
                 getEdgeCurve: true,
                 evaluateFace: true,
+                getPlanarFaceWires: true,
                 parameterModes: ['normalized', 'native'],
             },
             analysis: {

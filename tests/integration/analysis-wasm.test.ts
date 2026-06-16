@@ -158,6 +158,69 @@ describeIfBuilt('Real WASM analysis queries', () => {
         }
     });
 
+    it('returns exact trimmed planar wires for a planar face with a hole', () => {
+        const supportsPlanarFaceWires = typeof (kernel as unknown as { getPlanarFaceWires?: unknown }).getPlanarFaceWires === 'function'
+            && kernel.getCapabilities().subshapeEvaluation?.getPlanarFaceWires === true;
+        if (!supportsPlanarFaceWires) {
+            return;
+        }
+
+        const holedProfile: Profile = {
+            wires: [
+                {
+                    segments: [
+                        { type: 'line', start: [0, 0], end: [12, 0] },
+                        { type: 'line', start: [12, 0], end: [12, 10] },
+                        { type: 'line', start: [12, 10], end: [0, 10] },
+                        { type: 'line', start: [0, 10], end: [0, 0] },
+                    ],
+                },
+                {
+                    segments: [
+                        { type: 'line', start: [4, 3], end: [8, 3] },
+                        { type: 'line', start: [8, 3], end: [8, 7] },
+                        { type: 'line', start: [8, 7], end: [4, 7] },
+                        { type: 'line', start: [4, 7], end: [4, 3] },
+                    ],
+                },
+            ],
+        };
+        const solid = kernel.extrudeProfile({ profile: holedProfile, height: 8 });
+
+        try {
+            const topology = kernel.getTopology(solid);
+            const trimmedFace = (topology.faces ?? [])
+                .map((face) => {
+                    try {
+                        return kernel.getPlanarFaceWires({ shape: solid, face: { topoId: face.id } });
+                    } catch {
+                        return null;
+                    }
+                })
+                .find((result) => result !== null && result.wires.length === 2);
+
+            expect(trimmedFace).toBeDefined();
+            if (trimmedFace === undefined || trimmedFace === null) {
+                throw new Error('Expected a planar face with outer and inner trimmed wires');
+            }
+
+            expect(trimmedFace.surfaceType).toBe('plane');
+            expect(trimmedFace.wires).toHaveLength(2);
+            expect(trimmedFace.wires[0].kind).toBe('outer');
+            expect(trimmedFace.wires[1].kind).toBe('hole');
+            expect(trimmedFace.wires[0].segments).toHaveLength(4);
+            expect(trimmedFace.wires[1].segments).toHaveLength(4);
+            expect(trimmedFace.wires[0].segments.every((segment) => segment.planarCurve.curveType === 'line')).toBe(true);
+            expect(trimmedFace.wires[1].segments.every((segment) => segment.planarCurve.curveType === 'line')).toBe(true);
+            expect(trimmedFace.wires[0].segments.map((segment) => segment.planarCurve.startPoint)).toContainEqual([0, 0]);
+            expect(trimmedFace.wires[1].segments.map((segment) => segment.planarCurve.startPoint)).toContainEqual([4, 3]);
+            const zValues = trimmedFace.wires[0].segments.map((segment) => segment.spatialCurve.startPoint[2]);
+            expect(new Set(zValues).size).toBe(1);
+        } finally {
+            kernel.disposeShape({ shape: solid });
+        }
+    });
+
     it('retains a modified face stable hash across a real boolean cut revision', () => {
         const box = kernel.createBox({ dx: 10, dy: 10, dz: 10 });
         const cutter = kernel.createCylinder({ radius: 1.5, height: 12 });

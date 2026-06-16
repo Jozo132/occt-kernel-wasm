@@ -483,9 +483,14 @@ const faceEval = kernel.evaluateFace({
     u: 0.5,
     v: 0.5,
 });
+
+const planarTrim = kernel.getPlanarFaceWires({
+    shape: box,
+    face: { topoId: 1 },
+});
 ```
 
-Edge and face references accept a runtime `topoId` or a `stableHash`. Edge and face evaluation use normalized parameters by default; pass `parameterMode: 'native'` on the reference to use the OCCT curve or surface parameter domain directly. `getEdgeCurve` returns analytic line/circle metadata where available and Bezier/B-spline poles, weights, knots, and multiplicities for exact curve types.
+Edge and face references accept a runtime `topoId` or a `stableHash`. Edge and face evaluation use normalized parameters by default; pass `parameterMode: 'native'` on the reference to use the OCCT curve or surface parameter domain directly. `getEdgeCurve` returns analytic line/circle metadata where available and Bezier/B-spline poles, weights, knots, and multiplicities for exact curve types. `getPlanarFaceWires` is planar-face-only and returns the exact ordered trimmed loops twice: once in local plane coordinates and once as exact world-space edge curves. That makes it suitable for CAM boundaries, sketch/profile recovery, and other exact face-outline workflows without consulting tessellation.
 
 ### Topology query
 
@@ -524,8 +529,8 @@ const schema = kernel.getOperationSchema();
 // Versioned machine-readable operation contracts for structured extrude,
 // revolve, sweep, loft, fillet, chamfer, getVersionInfo, analyzeShape,
 // classifyPointContainment, intersectShapes, findClosestPointOnShape,
-// measureShapeDistance, evaluateEdge, sampleEdge, getEdgeCurve, and
-// evaluateFace.
+// measureShapeDistance, evaluateEdge, sampleEdge, getEdgeCurve,
+// evaluateFace, and getPlanarFaceWires.
 ```
 
 ### Version metadata and exact analysis

@@ -153,6 +153,9 @@ public:
     /// Evaluate an exact face at a normalized or native UV parameter.
     std::string evaluateFace(uint32_t id, const std::string& faceRefJson, double u, double v);
 
+    /// Return the exact trimmed wires of a planar face in both local 2-D and world 3-D form.
+    std::string getPlanarFaceWires(uint32_t id, const std::string& faceRefJson);
+
     /// Return the native operation schema/capability contract.
     std::string getOperationSchema() const;
 

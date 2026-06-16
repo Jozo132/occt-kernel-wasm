@@ -57,6 +57,7 @@ EMSCRIPTEN_BINDINGS(occt_kernel_module) {
         .function("sampleEdge", &OcctKernel::sampleEdge)
         .function("getEdgeCurve", &OcctKernel::getEdgeCurve)
         .function("evaluateFace", &OcctKernel::evaluateFace)
+        .function("getPlanarFaceWires", &OcctKernel::getPlanarFaceWires)
         .function("getOperationSchema", &OcctKernel::getOperationSchema)
         .function("getCapabilities", &OcctKernel::getCapabilities)
         .function("getKernelVersionInfo", &OcctKernel::getKernelVersionInfo)

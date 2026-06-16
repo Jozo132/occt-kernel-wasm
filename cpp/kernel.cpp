@@ -25,6 +25,7 @@
 #include <BRep_Builder.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBndLib.hxx>
@@ -92,10 +93,20 @@
 #include <TShort_Array1OfShortReal.hxx>
 #include <gp_Vec.hxx>
 #include <gp_Pnt2d.hxx>
+#include <gp_Circ2d.hxx>
+#include <gp_Elips.hxx>
+#include <gp_Elips2d.hxx>
+#include <gp_Lin2d.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom2dAdaptor_Curve.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_BezierCurve.hxx>
+#include <Geom2dConvert.hxx>
+#include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BezierCurve.hxx>
+#include <GeomConvert.hxx>
 #include <Approx_ParametrizationType.hxx>
 #include <GeomAbs_Shape.hxx>
 #include <BRepBuilderAPI_TransitionMode.hxx>
@@ -966,6 +977,287 @@ void appendPointJson(std::ostringstream& out, const gp_Pnt& point) {
 
 void appendVectorJson(std::ostringstream& out, const gp_Vec& vector) {
     out << '[' << vector.X() << ',' << vector.Y() << ',' << vector.Z() << ']';
+}
+
+void appendPoint2Json(std::ostringstream& out, const gp_Pnt2d& point) {
+    out << '[' << point.X() << ',' << point.Y() << ']';
+}
+
+void appendDirection2Json(std::ostringstream& out, const gp_Dir2d& direction) {
+    out << '[' << direction.X() << ',' << direction.Y() << ']';
+}
+
+void appendPlaneFrameJson(std::ostringstream& out, const gp_Pln& plane) {
+    out << "{\"origin\":";
+    appendPointJson(out, plane.Location());
+    out << ",\"normal\":";
+    appendVectorJson(out, gp_Vec(plane.Axis().Direction()));
+    out << ",\"xDirection\":";
+    appendVectorJson(out, gp_Vec(plane.XAxis().Direction()));
+    out << '}';
+}
+
+double normalizedCurveParameter(double value, double first, double last) {
+    const double range = last - first;
+    if (std::abs(range) <= 1.0e-18) return 0.0;
+    return (value - first) / range;
+}
+
+struct OrientedCurveRange {
+    double first = 0.0;
+    double last = 0.0;
+    bool reversed = false;
+};
+
+OrientedCurveRange orientCurveRangeForWire(const TopoDS_Edge& edge, const BRepAdaptor_Curve& curve) {
+    const double domainFirst = curve.FirstParameter();
+    const double domainLast = curve.LastParameter();
+    bool reversed = edge.Orientation() == TopAbs_REVERSED;
+
+    const TopoDS_Vertex startVertex = TopExp::FirstVertex(edge, true);
+    const TopoDS_Vertex endVertex = TopExp::LastVertex(edge, true);
+    if (!startVertex.IsNull() && !endVertex.IsNull() && !startVertex.IsSame(endVertex)) {
+        const gp_Pnt wireStart = BRep_Tool::Pnt(startVertex);
+        const gp_Pnt wireEnd = BRep_Tool::Pnt(endVertex);
+        const gp_Pnt curveStart = curve.Value(domainFirst);
+        const gp_Pnt curveEnd = curve.Value(domainLast);
+        const double directError = curveStart.SquareDistance(wireStart) + curveEnd.SquareDistance(wireEnd);
+        const double reverseError = curveStart.SquareDistance(wireEnd) + curveEnd.SquareDistance(wireStart);
+        reversed = reverseError + 1.0e-18 < directError;
+    }
+
+    return {
+        reversed ? domainLast : domainFirst,
+        reversed ? domainFirst : domainLast,
+        reversed,
+    };
+}
+
+void appendCurveDomainJson(std::ostringstream& out, double first, double last) {
+    out << "{\"first\":" << first << ",\"last\":" << last << '}';
+}
+
+void appendCurveTrimJson(std::ostringstream& out, double trimFirst, double trimLast, double domainFirst, double domainLast) {
+    out << "{\"first\":" << trimFirst
+        << ",\"last\":" << trimLast
+        << ",\"normalizedFirst\":" << normalizedCurveParameter(trimFirst, domainFirst, domainLast)
+        << ",\"normalizedLast\":" << normalizedCurveParameter(trimLast, domainFirst, domainLast)
+        << '}';
+}
+
+void appendBsplineCurveJson(std::ostringstream& out, const Handle(Geom_BSplineCurve)& bspline) {
+    out << "{\"degree\":" << bspline->Degree()
+        << ",\"periodic\":" << (bspline->IsPeriodic() ? "true" : "false")
+        << ",\"poles\":[";
+    for (int i = 1; i <= bspline->NbPoles(); ++i) {
+        if (i > 1) out << ',';
+        appendPointJson(out, bspline->Pole(i));
+    }
+    out << "],\"weights\":[";
+    for (int i = 1; i <= bspline->NbPoles(); ++i) {
+        if (i > 1) out << ',';
+        out << bspline->Weight(i);
+    }
+    out << "],\"knots\":[";
+    for (int i = 1; i <= bspline->NbKnots(); ++i) {
+        if (i > 1) out << ',';
+        out << bspline->Knot(i);
+    }
+    out << "],\"multiplicities\":[";
+    for (int i = 1; i <= bspline->NbKnots(); ++i) {
+        if (i > 1) out << ',';
+        out << bspline->Multiplicity(i);
+    }
+    out << "]}";
+}
+
+void appendBezierCurveJson(std::ostringstream& out, const Handle(Geom_BezierCurve)& bezier) {
+    out << "{\"degree\":" << bezier->Degree() << ",\"poles\":[";
+    for (int i = 1; i <= bezier->NbPoles(); ++i) {
+        if (i > 1) out << ',';
+        appendPointJson(out, bezier->Pole(i));
+    }
+    out << "],\"weights\":[";
+    for (int i = 1; i <= bezier->NbPoles(); ++i) {
+        if (i > 1) out << ',';
+        out << bezier->Weight(i);
+    }
+    out << "]}";
+}
+
+void appendBsplineCurve2dJson(std::ostringstream& out, const Handle(Geom2d_BSplineCurve)& bspline) {
+    out << "{\"degree\":" << bspline->Degree()
+        << ",\"periodic\":" << (bspline->IsPeriodic() ? "true" : "false")
+        << ",\"poles\":[";
+    for (int i = 1; i <= bspline->NbPoles(); ++i) {
+        if (i > 1) out << ',';
+        appendPoint2Json(out, bspline->Pole(i));
+    }
+    out << "],\"weights\":[";
+    for (int i = 1; i <= bspline->NbPoles(); ++i) {
+        if (i > 1) out << ',';
+        out << bspline->Weight(i);
+    }
+    out << "],\"knots\":[";
+    for (int i = 1; i <= bspline->NbKnots(); ++i) {
+        if (i > 1) out << ',';
+        out << bspline->Knot(i);
+    }
+    out << "],\"multiplicities\":[";
+    for (int i = 1; i <= bspline->NbKnots(); ++i) {
+        if (i > 1) out << ',';
+        out << bspline->Multiplicity(i);
+    }
+    out << "]}";
+}
+
+void appendBezierCurve2dJson(std::ostringstream& out, const Handle(Geom2d_BezierCurve)& bezier) {
+    out << "{\"degree\":" << bezier->Degree() << ",\"poles\":[";
+    for (int i = 1; i <= bezier->NbPoles(); ++i) {
+        if (i > 1) out << ',';
+        appendPoint2Json(out, bezier->Pole(i));
+    }
+    out << "],\"weights\":[";
+    for (int i = 1; i <= bezier->NbPoles(); ++i) {
+        if (i > 1) out << ',';
+        out << bezier->Weight(i);
+    }
+    out << "]}";
+}
+
+void appendSpatialCurveDescriptorJson(std::ostringstream& out,
+                                      const TopoDS_Edge& edge,
+                                      double domainFirst,
+                                      double domainLast,
+                                      double trimFirst,
+                                      double trimLast) {
+    BRepAdaptor_Curve curve(edge);
+    const gp_Pnt startPoint = curve.Value(trimFirst);
+    const gp_Pnt midPoint = curve.Value(trimFirst + (trimLast - trimFirst) * 0.5);
+    const gp_Pnt endPoint = curve.Value(trimLast);
+
+    out << '{';
+    out << "\"curveType\":";
+    appendJsonString(out, curveTypeName(curve.GetType()));
+    out << ",\"domain\":";
+    appendCurveDomainJson(out, domainFirst, domainLast);
+    out << ",\"trim\":";
+    appendCurveTrimJson(out, trimFirst, trimLast, domainFirst, domainLast);
+    out << ",\"startPoint\":";
+    appendPointJson(out, startPoint);
+    out << ",\"midPoint\":";
+    appendPointJson(out, midPoint);
+    out << ",\"endPoint\":";
+    appendPointJson(out, endPoint);
+
+    if (curve.GetType() == GeomAbs_Line) {
+        const gp_Lin line = curve.Line();
+        out << ",\"line\":{\"origin\":";
+        appendPointJson(out, line.Location());
+        out << ",\"direction\":";
+        appendVectorJson(out, gp_Vec(line.Direction()));
+        out << '}';
+    } else if (curve.GetType() == GeomAbs_Circle) {
+        const gp_Circ circle = curve.Circle();
+        out << ",\"circle\":{\"center\":";
+        appendPointJson(out, circle.Location());
+        out << ",\"radius\":" << circle.Radius() << ",\"normal\":";
+        appendVectorJson(out, gp_Vec(circle.Axis().Direction()));
+        out << ",\"xDirection\":";
+        appendVectorJson(out, gp_Vec(circle.XAxis().Direction()));
+        out << '}';
+    } else if (curve.GetType() == GeomAbs_Ellipse) {
+        const gp_Elips ellipse = curve.Ellipse();
+        out << ",\"ellipse\":{\"center\":";
+        appendPointJson(out, ellipse.Location());
+        out << ",\"majorRadius\":" << ellipse.MajorRadius() << ",\"minorRadius\":" << ellipse.MinorRadius() << ",\"normal\":";
+        appendVectorJson(out, gp_Vec(ellipse.Axis().Direction()));
+        out << ",\"xDirection\":";
+        appendVectorJson(out, gp_Vec(ellipse.XAxis().Direction()));
+        out << '}';
+    } else if (curve.GetType() == GeomAbs_BSplineCurve) {
+        out << ",\"bspline\":";
+        appendBsplineCurveJson(out, curve.BSpline());
+    } else if (curve.GetType() == GeomAbs_BezierCurve) {
+        out << ",\"bezier\":";
+        appendBezierCurveJson(out, curve.Bezier());
+    } else {
+        Standard_Real exactFirst = 0.0;
+        Standard_Real exactLast = 0.0;
+        Handle(Geom_Curve) exactCurve = BRep_Tool::Curve(TopoDS::Edge(edge.Oriented(TopAbs_FORWARD)), exactFirst, exactLast);
+        if (!exactCurve.IsNull()) {
+            Handle(Geom_BSplineCurve) bspline = GeomConvert::CurveToBSplineCurve(exactCurve);
+            if (!bspline.IsNull()) {
+                out << ",\"bspline\":";
+                appendBsplineCurveJson(out, bspline);
+            }
+        }
+    }
+
+    out << '}';
+}
+
+void appendPlanarCurveDescriptorJson(std::ostringstream& out,
+                                     const Handle(Geom2d_Curve)& curveHandle,
+                                     double domainFirst,
+                                     double domainLast,
+                                     double trimFirst,
+                                     double trimLast) {
+    const double domainMin = std::min(domainFirst, domainLast);
+    const double domainMax = std::max(domainFirst, domainLast);
+    Geom2dAdaptor_Curve curve(curveHandle, domainMin, domainMax);
+    const gp_Pnt2d startPoint = curve.Value(trimFirst);
+    const gp_Pnt2d midPoint = curve.Value(trimFirst + (trimLast - trimFirst) * 0.5);
+    const gp_Pnt2d endPoint = curve.Value(trimLast);
+
+    out << '{';
+    out << "\"curveType\":";
+    appendJsonString(out, curveTypeName(curve.GetType()));
+    out << ",\"domain\":";
+    appendCurveDomainJson(out, domainFirst, domainLast);
+    out << ",\"trim\":";
+    appendCurveTrimJson(out, trimFirst, trimLast, domainFirst, domainLast);
+    out << ",\"startPoint\":";
+    appendPoint2Json(out, startPoint);
+    out << ",\"midPoint\":";
+    appendPoint2Json(out, midPoint);
+    out << ",\"endPoint\":";
+    appendPoint2Json(out, endPoint);
+
+    if (curve.GetType() == GeomAbs_Line) {
+        const gp_Lin2d line = curve.Line();
+        out << ",\"line\":{\"origin\":";
+        appendPoint2Json(out, line.Location());
+        out << ",\"direction\":";
+        appendDirection2Json(out, line.Direction());
+        out << '}';
+    } else if (curve.GetType() == GeomAbs_Circle) {
+        const gp_Circ2d circle = curve.Circle();
+        out << ",\"circle\":{\"center\":";
+        appendPoint2Json(out, circle.Location());
+        out << ",\"radius\":" << circle.Radius() << '}';
+    } else if (curve.GetType() == GeomAbs_Ellipse) {
+        const gp_Elips2d ellipse = curve.Ellipse();
+        out << ",\"ellipse\":{\"center\":";
+        appendPoint2Json(out, ellipse.Location());
+        out << ",\"xDirection\":";
+        appendDirection2Json(out, ellipse.XAxis().Direction());
+        out << ",\"majorRadius\":" << ellipse.MajorRadius() << ",\"minorRadius\":" << ellipse.MinorRadius() << '}';
+    } else if (curve.GetType() == GeomAbs_BSplineCurve) {
+        out << ",\"bspline\":";
+        appendBsplineCurve2dJson(out, curve.BSpline());
+    } else if (curve.GetType() == GeomAbs_BezierCurve) {
+        out << ",\"bezier\":";
+        appendBezierCurve2dJson(out, curve.Bezier());
+    } else {
+        Handle(Geom2d_BSplineCurve) bspline = Geom2dConvert::CurveToBSplineCurve(curveHandle);
+        if (!bspline.IsNull()) {
+            out << ",\"bspline\":";
+            appendBsplineCurve2dJson(out, bspline);
+        }
+    }
+
+    out << '}';
 }
 
 bool samePointWithinTolerance(const gp_Pnt& a, const gp_Pnt& b) {
@@ -5457,6 +5749,107 @@ std::string OcctKernel::evaluateFace(uint32_t id, const std::string& faceRefJson
     return "{}";
 }
 
+std::string OcctKernel::getPlanarFaceWires(uint32_t id, const std::string& faceRefJson) {
+    const std::string operation = "getPlanarFaceWires";
+    try {
+        auto it = _impl->records.find(id);
+        if (it == _impl->records.end()) {
+            throwKernelError("INVALID_HANDLE", "No shape with handle " + std::to_string(id));
+        }
+        const mini_json::Value faceRef = mini_json::requireObject(mini_json::parse(faceRefJson), "faceRef");
+        ResolvedFaceRef face = resolveFaceRef(it->second.shape, &it->second.revision, faceRef, operation, "faceRef");
+        BRepAdaptor_Surface surface(face.face, false);
+        if (surface.GetType() != GeomAbs_Plane) {
+            throwStructuredValidation(operation, "faceRef", "Selected face is not planar");
+        }
+
+        const gp_Pln plane = surface.Plane();
+        const double firstU = surface.FirstUParameter();
+        const double lastU = surface.LastUParameter();
+        const double firstV = surface.FirstVParameter();
+        const double lastV = surface.LastVParameter();
+
+        ShapeMap edges;
+        TopExp::MapShapes(it->second.shape, TopAbs_EDGE, edges);
+        const std::vector<std::string> edgeHashes = edgeStableHashesForShape(it->second.shape, &it->second.revision);
+
+        std::vector<std::pair<TopoDS_Wire, bool>> wires;
+        const TopoDS_Wire outerWire = BRepTools::OuterWire(face.face);
+        if (!outerWire.IsNull()) {
+            wires.emplace_back(outerWire, true);
+        }
+        for (TopExp_Explorer ex(face.face, TopAbs_WIRE); ex.More(); ex.Next()) {
+            const TopoDS_Wire wire = TopoDS::Wire(ex.Current());
+            if (!outerWire.IsNull() && wire.IsSame(outerWire)) continue;
+            wires.emplace_back(wire, false);
+        }
+
+        std::ostringstream ss;
+        ss << '{';
+        ss << "\"face\":";
+        appendEntityRefJson(ss, face);
+        ss << ",\"surfaceType\":\"plane\",\"plane\":";
+        appendPlaneFrameJson(ss, plane);
+        ss << ",\"domain\":{\"u\":[" << firstU << ',' << lastU << "],\"v\":[" << firstV << ',' << lastV << "]},\"wires\":[";
+
+        for (std::size_t wireIndex = 0; wireIndex < wires.size(); ++wireIndex) {
+            if (wireIndex > 0) ss << ',';
+            ss << '{';
+            ss << "\"kind\":";
+            appendJsonString(ss, wires[wireIndex].second ? "outer" : "hole");
+            ss << ",\"segments\":[";
+
+            bool firstSegment = true;
+            for (BRepTools_WireExplorer wx(wires[wireIndex].first, face.face); wx.More(); wx.Next()) {
+                const TopoDS_Edge wireEdge = TopoDS::Edge(wx.Current());
+                if (wireEdge.IsNull()) continue;
+
+                BRepAdaptor_Curve curve(wireEdge);
+                const OrientedCurveRange orientedRange = orientCurveRangeForWire(wireEdge, curve);
+
+                Standard_Real pcurveFirst = 0.0;
+                Standard_Real pcurveLast = 0.0;
+                Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(wireEdge, face.face, pcurveFirst, pcurveLast);
+                if (pcurve.IsNull()) {
+                    throwKernelError("OPERATION_FAILED", "Planar face trim extraction requires face pcurves for each boundary edge");
+                }
+
+                const TopoDS_Edge canonicalEdge = TopoDS::Edge(wireEdge.Oriented(TopAbs_FORWARD));
+                const int edgeTopoId = edges.FindIndex(canonicalEdge);
+                const std::string edgeHash = edgeTopoId > 0 && static_cast<std::size_t>(edgeTopoId) < edgeHashes.size()
+                    ? edgeHashes[static_cast<std::size_t>(edgeTopoId)]
+                    : std::string();
+                const ResolvedEdgeRef edgeRef = { canonicalEdge, edgeTopoId, edgeHash };
+                const double planarTrimFirst = orientedRange.reversed ? pcurveLast : pcurveFirst;
+                const double planarTrimLast = orientedRange.reversed ? pcurveFirst : pcurveLast;
+
+                if (!firstSegment) ss << ',';
+                ss << '{';
+                ss << "\"edge\":";
+                appendEntityRefJson(ss, edgeRef);
+                ss << ",\"orientation\":";
+                appendJsonString(ss, orientedRange.reversed ? "reversed" : "forward");
+                ss << ",\"planarCurve\":";
+                appendPlanarCurveDescriptorJson(ss, pcurve, pcurveFirst, pcurveLast, planarTrimFirst, planarTrimLast);
+                ss << ",\"spatialCurve\":";
+                appendSpatialCurveDescriptorJson(ss, wireEdge, curve.FirstParameter(), curve.LastParameter(), orientedRange.first, orientedRange.last);
+                ss << '}';
+                firstSegment = false;
+            }
+
+            ss << "]}";
+        }
+
+        ss << "]}";
+        return ss.str();
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const Standard_Failure& sf) {
+        throwKernelError("OPERATION_FAILED", sf.what());
+    }
+    return "{}";
+}
+
 std::string OcctKernel::getOperationSchema() const {
     return "{"
         "\"schemaVersion\":1,"
@@ -5478,7 +5871,8 @@ std::string OcctKernel::getOperationSchema() const {
         "\"evaluateEdge\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
         "\"sampleEdge\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
         "\"getEdgeCurve\":{\"schemaVersion\":1,\"nativeExact\":true},"
-        "\"evaluateFace\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]}"
+        "\"evaluateFace\":{\"schemaVersion\":1,\"nativeExact\":true,\"parameterModes\":[\"normalized\",\"native\"]},"
+        "\"getPlanarFaceWires\":{\"schemaVersion\":1,\"nativeExact\":true,\"planarFacesOnly\":true,\"returnsLocalAndWorldWires\":true}"
         "}"
         "}";
 }
@@ -5619,6 +6013,7 @@ std::string OcctKernel::getCapabilities() const {
         "\"sampleEdge\":true,"
         "\"getEdgeCurve\":true,"
         "\"evaluateFace\":true,"
+        "\"getPlanarFaceWires\":true,"
         "\"parameterModes\":[\"normalized\",\"native\"]"
         "},"
         "\"analysis\":{"

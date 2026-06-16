@@ -68,6 +68,8 @@ import type {
     LoftSpec,
     MapEntitiesAcrossRevisionsParams,
     PlaneFrame,
+    PlanarFaceWiresParams,
+    PlanarFaceWiresResult,
     PointContainmentParams,
     PointContainmentResult,
     Point2,
@@ -150,6 +152,7 @@ export interface NativeKernel {
     sampleEdge?: (id: number, edgeRefJson: string, optionsJson: string) => string;
     getEdgeCurve?: (id: number, edgeRefJson: string) => string;
     evaluateFace?: (id: number, faceRefJson: string, u: number, v: number) => string;
+    getPlanarFaceWires?: (id: number, faceRefJson: string) => string;
     getOperationSchema?: () => string;
     getCapabilities?: () => string;
     getKernelVersionInfo?: () => string;
@@ -1909,6 +1912,16 @@ export class OcctKernel {
         requireFinite(params.v, 'v');
         const raw = wrap(() => this._native.evaluateFace?.(this.shapeId(params.shape), JSON.stringify(params.face), params.u, params.v) ?? '{}');
         return parseJson<FaceEvaluationResult>(raw, 'face evaluation');
+    }
+
+    /** Return the exact trimmed wires of a planar face in both local 2-D and world 3-D form. */
+    getPlanarFaceWires(params: PlanarFaceWiresParams): PlanarFaceWiresResult {
+        if (typeof this._native.getPlanarFaceWires !== 'function') {
+            throw new KernelError('UNKNOWN', 'Native module does not support getPlanarFaceWires');
+        }
+        requireFaceRef(params.face, 'face');
+        const raw = wrap(() => this._native.getPlanarFaceWires?.(this.shapeId(params.shape), JSON.stringify(params.face)) ?? '{}');
+        return parseJson<PlanarFaceWiresResult>(raw, 'planar face wires');
     }
 
     /** Return the versioned operation schema advertised by the native kernel. */

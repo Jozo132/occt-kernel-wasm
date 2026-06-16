@@ -660,6 +660,121 @@ export interface FaceEvaluationResult {
     readonly normal: Vector3 | null;
 }
 
+export interface CurveDomain {
+    readonly first: number;
+    readonly last: number;
+}
+
+export interface CurveTrimInterval {
+    readonly first: number;
+    readonly last: number;
+    readonly normalizedFirst: number;
+    readonly normalizedLast: number;
+}
+
+export interface ExactCurve2DResult {
+    readonly curveType: string;
+    readonly domain: CurveDomain;
+    readonly trim: CurveTrimInterval;
+    readonly startPoint: Point2;
+    readonly midPoint: Point2;
+    readonly endPoint: Point2;
+    readonly line?: {
+        readonly origin: Point2;
+        readonly direction: Point2;
+    };
+    readonly circle?: {
+        readonly center: Point2;
+        readonly radius: number;
+    };
+    readonly ellipse?: {
+        readonly center: Point2;
+        readonly xDirection: Point2;
+        readonly majorRadius: number;
+        readonly minorRadius: number;
+    };
+    readonly bspline?: {
+        readonly degree: number;
+        readonly periodic: boolean;
+        readonly poles: readonly Point2[];
+        readonly weights: readonly number[];
+        readonly knots: readonly number[];
+        readonly multiplicities: readonly number[];
+    };
+    readonly bezier?: {
+        readonly degree: number;
+        readonly poles: readonly Point2[];
+        readonly weights: readonly number[];
+    };
+}
+
+export interface ExactCurve3DResult {
+    readonly curveType: string;
+    readonly domain: CurveDomain;
+    readonly trim: CurveTrimInterval;
+    readonly startPoint: Point3;
+    readonly midPoint: Point3;
+    readonly endPoint: Point3;
+    readonly line?: {
+        readonly origin: Point3;
+        readonly direction: Vector3;
+    };
+    readonly circle?: {
+        readonly center: Point3;
+        readonly radius: number;
+        readonly normal: Vector3;
+        readonly xDirection: Vector3;
+    };
+    readonly ellipse?: {
+        readonly center: Point3;
+        readonly majorRadius: number;
+        readonly minorRadius: number;
+        readonly normal: Vector3;
+        readonly xDirection: Vector3;
+    };
+    readonly bspline?: {
+        readonly degree: number;
+        readonly periodic: boolean;
+        readonly poles: readonly Point3[];
+        readonly weights: readonly number[];
+        readonly knots: readonly number[];
+        readonly multiplicities: readonly number[];
+    };
+    readonly bezier?: {
+        readonly degree: number;
+        readonly poles: readonly Point3[];
+        readonly weights: readonly number[];
+    };
+}
+
+export interface PlanarFaceSegmentResult {
+    readonly edge: EdgeRef;
+    readonly orientation: 'forward' | 'reversed';
+    readonly planarCurve: ExactCurve2DResult;
+    readonly spatialCurve: ExactCurve3DResult;
+}
+
+export interface PlanarFaceWireResult {
+    readonly kind: 'outer' | 'hole';
+    readonly segments: readonly PlanarFaceSegmentResult[];
+}
+
+export interface PlanarFaceWiresParams {
+    readonly shape: ShapeHandle;
+    readonly face: FaceRef;
+}
+
+export interface PlanarFaceWiresResult {
+    readonly face: FaceRef;
+    readonly surfaceType: 'plane';
+    readonly plane: PlaneFrame;
+    readonly domain: {
+        readonly u: readonly [number, number];
+        readonly v: readonly [number, number];
+    };
+    readonly wires: readonly PlanarFaceWireResult[];
+}
+
 export interface OperationSchema {
     readonly schemaVersion: number;
     readonly operations: Record<string, unknown>;
@@ -1090,6 +1205,7 @@ export interface KernelCapabilities {
         readonly sampleEdge: boolean;
         readonly getEdgeCurve: boolean;
         readonly evaluateFace: boolean;
+        readonly getPlanarFaceWires: boolean;
         readonly parameterModes: readonly string[];
     };
     readonly analysis?: {
