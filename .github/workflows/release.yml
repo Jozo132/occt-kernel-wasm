@@ -57,19 +57,30 @@ jobs:
       - name: Type-check
         run: npm run lint
 
-      - name: Build package
-        run: npm run build
+      - name: Build release artifacts
+        run: npm run build:all
 
       - name: Check published tarball
         run: npm run pack:check
 
+      - name: Create release tarball
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARBALL="$(npm pack --silent)"
+          echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
+
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish
+        run: npm publish "${{ steps.pack.outputs.tarball }}"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          files: |
+            ${{ steps.pack.outputs.tarball }}
+            dist/*
           generate_release_notes: true

@@ -113,20 +113,22 @@ function Get-OcctVariantPaths {
         [string]$VersionRoot
     )
 
+    $commonEmFlags = "-sDISABLE_EXCEPTION_CATCHING=0 -sSUPPORT_LONGJMP=emscripten -msimd128"
+
     if ($VariantName -eq "mt") {
         return @{
             Build = Join-Path $VersionRoot "b-mt"
             Install = Join-Path $VersionRoot "i-mt"
-            CFlags = "-pthread -msimd128"
-            CxxFlags = "-pthread -msimd128"
+            CFlags = "-pthread $commonEmFlags"
+            CxxFlags = "-pthread $commonEmFlags"
         }
     }
 
     return @{
         Build = Join-Path $VersionRoot "b"
         Install = Join-Path $VersionRoot "i"
-        CFlags = "-msimd128"
-        CxxFlags = "-msimd128"
+        CFlags = $commonEmFlags
+        CxxFlags = $commonEmFlags
     }
 }
 
@@ -147,7 +149,7 @@ function Get-OcctVariantSignature {
         "cflags=$($VariantPaths.CFlags)",
         "cxxflags=$($VariantPaths.CxxFlags)",
         "buildType=Release",
-        "scriptSchema=occt-cache-v1"
+        "scriptSchema=occt-cache-v2"
     ) -join "`n"
 }
 
@@ -171,7 +173,9 @@ function Test-OcctVariantCacheMatches {
         [string]$InstallDir,
         [string]$SourceRoot,
         [string]$Toolchain,
-        [string]$Toolkits
+        [string]$Toolkits,
+        [string]$CFlags,
+        [string]$CxxFlags
     )
 
     $cacheFile = Join-Path $BuildDir "CMakeCache.txt"
@@ -183,10 +187,12 @@ function Test-OcctVariantCacheMatches {
     $cacheContent = Get-Content $cacheFile -Raw
     $toolchainMatches = $cacheContent.Contains("CMAKE_TOOLCHAIN_FILE:FILEPATH=$Toolchain") -or $cacheContent.Contains("CMAKE_TOOLCHAIN_FILE:UNINITIALIZED=$Toolchain") -or (Test-CacheContainsPath -CacheContent $cacheContent -PathValue $Toolchain)
     $toolkitsMatches = $cacheContent.Contains("BUILD_ADDITIONAL_TOOLKITS:STRING=$Toolkits")
+    $cFlagsMatch = $cacheContent.Contains("CMAKE_C_FLAGS:STRING=$CFlags")
+    $cxxFlagsMatch = $cacheContent.Contains("CMAKE_CXX_FLAGS:STRING=$CxxFlags")
     $installMatches = $cacheContent.Contains("INSTALL_DIR:PATH=$($InstallDir.Replace("\", "/"))") -or (Test-CacheContainsPath -CacheContent $cacheContent -PathValue $InstallDir)
     $sourceMatches = Test-CacheContainsPath -CacheContent $cacheContent -PathValue $SourceRoot
 
-    return $toolchainMatches -and $toolkitsMatches -and $installMatches -and $sourceMatches
+    return $toolchainMatches -and $toolkitsMatches -and $cFlagsMatch -and $cxxFlagsMatch -and $installMatches -and $sourceMatches
 }
 
 function Test-OcctVariantReady {
@@ -263,7 +269,7 @@ try {
             continue
         }
 
-        if (-not $Reconfigure -and (Test-OcctVariantCacheMatches -BuildDir $occtBuild -InstallDir $occtInstall -SourceRoot $ActiveOcctSource -Toolchain $TOOLCHAIN -Toolkits $OCCT_TOOLKITS)) {
+        if (-not $Reconfigure -and (Test-OcctVariantCacheMatches -BuildDir $occtBuild -InstallDir $occtInstall -SourceRoot $ActiveOcctSource -Toolchain $TOOLCHAIN -Toolkits $OCCT_TOOLKITS -CFlags $variantPaths.CFlags -CxxFlags $variantPaths.CxxFlags)) {
             Write-OcctVariantStamp -InstallDir $occtInstall -Signature $variantSignature
             Write-Host "[build-occt] Adopted existing OCCT $variantName cache at $occtInstall"
             continue

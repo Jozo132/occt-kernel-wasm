@@ -173,12 +173,20 @@ if(OCCT_KERNEL_WASM)
         target_link_directories(occt-kernel PRIVATE "${OCCT_ROOT}/lib")
     endif()
 
+    # Keep longjmp handling on the JS runtime path so OCCT exception support does
+    # not resolve to wasm SjLj helper symbols that are incompatible with
+    # DISABLE_EXCEPTION_CATCHING=0 on newer distro-packaged Emscripten builds.
+    set(EM_COMMON_FLAGS
+        "-fexceptions"
+        "-sDISABLE_EXCEPTION_CATCHING=0"
+        "-sSUPPORT_LONGJMP=emscripten"
+    )
+
     # Emscripten link flags
     set(EM_LINK_FLAGS
         # Use Emscripten embind
         "--bind"
         # C++ exceptions (required for OCCT Standard_Failure propagation)
-        "-sDISABLE_EXCEPTION_CATCHING=0"
         # Modularise the JS output so it can be imported as an ES module or CJS
         "-sMODULARIZE=1"
         "-sEXPORT_NAME=createOcctKernelModule"
@@ -203,8 +211,12 @@ if(OCCT_KERNEL_WASM)
         "$<$<CONFIG:Debug>:-gsource-map>"
     )
 
+    foreach(flag IN LISTS EM_COMMON_FLAGS)
+        target_compile_options(occt-kernel PRIVATE "SHELL:${flag}")
+    endforeach()
+
     # Apply as target link options
-    foreach(flag IN LISTS EM_LINK_FLAGS)
+    foreach(flag IN LISTS EM_COMMON_FLAGS EM_LINK_FLAGS)
         target_link_options(occt-kernel PRIVATE "SHELL:${flag}")
     endforeach()
 
@@ -250,7 +262,6 @@ if(SKETCH_TOOLKIT_WASM)
 
     set(SKETCH_TOOLKIT_LINK_FLAGS
         "--bind"
-        "-sDISABLE_EXCEPTION_CATCHING=0"
         "-sMODULARIZE=1"
         "-sEXPORT_NAME=createSketchToolkitModule"
         "-sENVIRONMENT=web,node"
@@ -266,7 +277,11 @@ if(SKETCH_TOOLKIT_WASM)
         "$<$<CONFIG:Debug>:-gsource-map>"
     )
 
-    foreach(flag IN LISTS SKETCH_TOOLKIT_LINK_FLAGS)
+    foreach(flag IN LISTS EM_COMMON_FLAGS)
+        target_compile_options(sketch-toolkit PRIVATE "SHELL:${flag}")
+    endforeach()
+
+    foreach(flag IN LISTS EM_COMMON_FLAGS SKETCH_TOOLKIT_LINK_FLAGS)
         target_link_options(sketch-toolkit PRIVATE "SHELL:${flag}")
     endforeach()
 

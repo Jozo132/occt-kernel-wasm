@@ -134,9 +134,9 @@ Releases are tagged `vMAJOR.MINOR.PATCH`. After merging to `main`:
 
 1. Update `version` in `package.json`.
 2. Add a changelog entry.
-3. Push a version tag: `git tag v1.1.0 && git push origin v1.1.0`.
+3. Push a version tag, for example `git tag v1.2.0 && git push origin v1.2.0`.
 4. Push the version tag to trigger the GitHub Actions Release workflow.
-5. The Release workflow validates the package and publishes to npm when the `NPM_TOKEN` repository secret is configured.
+5. The Release workflow validates the package, builds the full release `dist/` payload, publishes the generated tarball to npm, and attaches the same tarball plus `dist/*` assets to the GitHub release when the `NPM_TOKEN` repository secret is configured.
 
 ---
 

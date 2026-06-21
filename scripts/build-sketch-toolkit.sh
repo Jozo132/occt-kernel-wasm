@@ -45,15 +45,46 @@ case "${BUILD_TYPE}" in
     fast)    CMAKE_BUILD_TYPE="Fast" ;;
 esac
 
+resolve_emscripten_bin_dir() {
+    local candidates=()
+    if [ -n "${EMSDK:-}" ]; then
+        candidates+=("${EMSDK}/upstream/emscripten")
+    fi
+    candidates+=(
+        "${HOME}/emsdk/upstream/emscripten"
+        "${HOME}/.cache/emsdk/upstream/emscripten"
+    )
+    if command -v emcc &>/dev/null; then
+        candidates+=("$(dirname "$(command -v emcc)")")
+    fi
+
+    for candidate in "${candidates[@]}"; do
+        if [ -x "${candidate}/emcc" ] && [ -x "${candidate}/em++" ] && [ -x "${candidate}/emcmake" ]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+EMSCRIPTEN_BIN_DIR="$(resolve_emscripten_bin_dir || true)"
 EMSCRIPTEN_TOOLCHAIN=""
-if command -v emcc &>/dev/null; then
-    EMCC_DIR="$(dirname "$(command -v emcc)")"
+EMSCRIPTEN_CMAKE=""
+if [ -n "${EMSCRIPTEN_BIN_DIR}" ]; then
+    EMSDK_ENV_SCRIPT="$(dirname "$(dirname "${EMSCRIPTEN_BIN_DIR}")")/emsdk_env.sh"
+    if [ -f "${EMSDK_ENV_SCRIPT}" ]; then
+        # shellcheck disable=SC1090
+        source "${EMSDK_ENV_SCRIPT}" >/dev/null
+        EMSCRIPTEN_BIN_DIR="$(dirname "$(command -v emcc)")"
+    fi
     for candidate in \
-        "${EMCC_DIR}/cmake/Modules/Platform/Emscripten.cmake" \
-        "$(dirname "${EMCC_DIR}")/cmake/Modules/Platform/Emscripten.cmake" \
+        "${EMSCRIPTEN_BIN_DIR}/cmake/Modules/Platform/Emscripten.cmake" \
+        "$(dirname "${EMSCRIPTEN_BIN_DIR}")/cmake/Modules/Platform/Emscripten.cmake" \
         "/usr/share/emscripten/cmake/Modules/Platform/Emscripten.cmake"; do
         if [ -f "${candidate}" ]; then
             EMSCRIPTEN_TOOLCHAIN="${candidate}"
+            EMSCRIPTEN_CMAKE="${EMSCRIPTEN_BIN_DIR}/emcmake"
             break
         fi
     done
@@ -70,8 +101,9 @@ mkdir -p "${BUILD_DIR}"
 
 if [ ! -f "${BUILD_DIR}/CMakeCache.txt" ] || [ "${RECONFIGURE}" -eq 1 ] || ! grep -Fq "sketch-toolkit.wasm" "${BUILD_DIR}/CMakeCache.txt"; then
     echo "[build-sketch] Configuring (${CMAKE_BUILD_TYPE})..."
-    emcmake cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
+    "${EMSCRIPTEN_CMAKE}" cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
         -DCMAKE_TOOLCHAIN_FILE="${EMSCRIPTEN_TOOLCHAIN}" \
+        -DEMSCRIPTEN=1 \
         -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
         -DSKETCH_TOOLKIT_WASM=ON \
         -DSKETCH_TOOLKIT_ARTIFACT_BASENAME=sketch-toolkit.wasm \

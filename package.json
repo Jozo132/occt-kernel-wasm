@@ -1,6 +1,6 @@
 {
   "name": "occt-kernel-wasm",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Reusable OCCT-based CAD kernel for WebAssembly with a small TypeScript API for exact solid modelling",
   "author": "Jože Vovk",
   "license": "MIT",
@@ -59,7 +59,7 @@
     "test:coverage": "jest --coverage",
     "lint": "tsc --project tsconfig.check.json",
     "pack:check": "npm pack --dry-run",
-    "prepublishOnly": "npm run build:sketch && npm run build && npm run pack:check"
+    "prepublishOnly": "npm run build:all && npm run pack:check"
   },
   "keywords": [
     "occt",

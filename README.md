@@ -538,7 +538,7 @@ const schema = kernel.getOperationSchema();
 ```ts
 const version = kernel.getVersionInfo();
 // {
-//   libraryVersion: '1.1.0',
+//   libraryVersion: '1.2.0',
 //   apiVersion: 1,
 //   kernelVersion: '8.0.0',
 //   checkpointSchemaVersion: 1,
@@ -791,6 +791,8 @@ CDN example:
 </script>
 ```
 
+Tagged releases publish the same prebuilt `dist/` payload to npm and attach it to the GitHub release, so the package works through `npm install`, jsDelivr, and unpkg without requiring a local WASM rebuild.
+
 See [`examples/browser/index.html`](examples/browser/index.html) for a complete demo.
 
 ---
@@ -866,7 +868,7 @@ For faster local iteration, use `npm run build:wasm:fast`. That builds only the 
 
 `npm run build:sketch` emits the mandatory `dist/sketch-toolkit.wasm.js` and `dist/sketch-toolkit.wasm.wasm` browser runtime files used by `modeller`.
 
-`npm run build:all` produces the OCCT `st` and `mt` caches, both exported kernel variants, the sketch toolkit runtime, and the publishable TypeScript entrypoints in one pass. The legacy `dist/occt-kernel.js` and `dist/occt-kernel.wasm` paths remain as compatibility aliases for the `st` build.
+`npm run build:all` produces the OCCT `st` and `mt` caches, both exported kernel variants, the sketch toolkit runtime, and the publishable TypeScript entrypoints in one pass. The legacy `dist/occt-kernel.js` and `dist/occt-kernel.wasm` paths remain as compatibility aliases for the `st` build, and the release workflow uses that full build before publishing to npm and creating the GitHub release assets.
 
 The `mt` kernel must link against a separate OCCT cache built with pthread atomics, so its OCCT install lives at `.../V8_0_0/i-mt` instead of sharing the single-threaded `.../V8_0_0/i` archive set.
 

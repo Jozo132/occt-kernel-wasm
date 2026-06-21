@@ -93,12 +93,13 @@ resolve_variants() {
 
 variant_paths() {
     local variant_name="$1"
+    local common_em_flags="-sDISABLE_EXCEPTION_CATCHING=0 -sSUPPORT_LONGJMP=emscripten -msimd128"
     if [ "${variant_name}" = "mt" ]; then
-        printf '%s\n%s\n%s\n%s\n' "${OCCT_VERSION_ROOT}/b-mt" "${OCCT_VERSION_ROOT}/i-mt" "-pthread -msimd128" "-pthread -msimd128"
+        printf '%s\n%s\n%s\n%s\n' "${OCCT_VERSION_ROOT}/b-mt" "${OCCT_VERSION_ROOT}/i-mt" "-pthread ${common_em_flags}" "-pthread ${common_em_flags}"
         return
     fi
 
-    printf '%s\n%s\n%s\n%s\n' "${OCCT_VERSION_ROOT}/b" "${OCCT_VERSION_ROOT}/i" "-msimd128" "-msimd128"
+    printf '%s\n%s\n%s\n%s\n' "${OCCT_VERSION_ROOT}/b" "${OCCT_VERSION_ROOT}/i" "${common_em_flags}" "${common_em_flags}"
 }
 
 variant_signature() {
@@ -107,7 +108,7 @@ variant_signature() {
     local toolchain="$3"
     local c_flags="$4"
     local cxx_flags="$5"
-    printf 'variant=%s\nsource=%s\ntoolchain=%s\ntoolkits=%s\ncflags=%s\ncxxflags=%s\nbuildType=Release\nscriptSchema=occt-cache-v1' \
+    printf 'variant=%s\nsource=%s\ntoolchain=%s\ntoolkits=%s\ncflags=%s\ncxxflags=%s\nbuildType=Release\nscriptSchema=occt-cache-v2' \
         "${variant_name}" "${source_root}" "${toolchain}" "${OCCT_TOOLKITS}" "${c_flags}" "${cxx_flags}"
 }
 
@@ -123,6 +124,8 @@ variant_cache_matches() {
     local install_dir="$2"
     local source_root="$3"
     local toolchain="$4"
+    local c_flags="$5"
+    local cxx_flags="$6"
     local cache_file="${build_dir}/CMakeCache.txt"
     local config_file="${install_dir}/lib/cmake/opencascade/OpenCASCADEConfig.cmake"
     local cache_content
@@ -133,6 +136,8 @@ variant_cache_matches() {
     cache_content="$(cat "${cache_file}")"
     [[ "${cache_content}" == *"BUILD_ADDITIONAL_TOOLKITS:STRING=${OCCT_TOOLKITS}"* ]] || return 1
     [[ "${cache_content}" == *"CMAKE_TOOLCHAIN_FILE:FILEPATH=${toolchain}"* ]] || [[ "${cache_content}" == *"CMAKE_TOOLCHAIN_FILE:UNINITIALIZED=${toolchain}"* ]] || cache_contains_path "${cache_content}" "${toolchain}" || return 1
+    [[ "${cache_content}" == *"CMAKE_C_FLAGS:STRING=${c_flags}"* ]] || return 1
+    [[ "${cache_content}" == *"CMAKE_CXX_FLAGS:STRING=${cxx_flags}"* ]] || return 1
     [[ "${cache_content}" == *"INSTALL_DIR:PATH=${install_dir//\\//}"* ]] || cache_contains_path "${cache_content}" "${install_dir}" || return 1
     cache_contains_path "${cache_content}" "${source_root}" || return 1
 }
@@ -232,16 +237,46 @@ fi
 # Configure with Emscripten
 # ---------------------------------------------------------------------------
 
-# Locate Emscripten toolchain file
+resolve_emscripten_bin_dir() {
+    local candidates=()
+    if [ -n "${EMSDK:-}" ]; then
+        candidates+=("${EMSDK}/upstream/emscripten")
+    fi
+    candidates+=(
+        "${HOME}/emsdk/upstream/emscripten"
+        "${HOME}/.cache/emsdk/upstream/emscripten"
+    )
+    if command -v emcc &>/dev/null; then
+        candidates+=("$(dirname "$(command -v emcc)")")
+    fi
+
+    for candidate in "${candidates[@]}"; do
+        if [ -x "${candidate}/emcc" ] && [ -x "${candidate}/em++" ] && [ -x "${candidate}/emcmake" ]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+EMSCRIPTEN_BIN_DIR="$(resolve_emscripten_bin_dir || true)"
 EMSCRIPTEN_TOOLCHAIN=""
-if command -v emcc &>/dev/null; then
-    EMCC_DIR="$(dirname "$(command -v emcc)")"
+EMSCRIPTEN_CMAKE=""
+if [ -n "${EMSCRIPTEN_BIN_DIR}" ]; then
+    EMSDK_ENV_SCRIPT="$(dirname "$(dirname "${EMSCRIPTEN_BIN_DIR}")")/emsdk_env.sh"
+    if [ -f "${EMSDK_ENV_SCRIPT}" ]; then
+        # shellcheck disable=SC1090
+        source "${EMSDK_ENV_SCRIPT}" >/dev/null
+        EMSCRIPTEN_BIN_DIR="$(dirname "$(command -v emcc)")"
+    fi
     for candidate in \
-        "${EMCC_DIR}/cmake/Modules/Platform/Emscripten.cmake" \
-        "$(dirname "${EMCC_DIR}")/cmake/Modules/Platform/Emscripten.cmake" \
+        "${EMSCRIPTEN_BIN_DIR}/cmake/Modules/Platform/Emscripten.cmake" \
+        "$(dirname "${EMSCRIPTEN_BIN_DIR}")/cmake/Modules/Platform/Emscripten.cmake" \
         "/usr/share/emscripten/cmake/Modules/Platform/Emscripten.cmake"; do
         if [ -f "${candidate}" ]; then
             EMSCRIPTEN_TOOLCHAIN="${candidate}"
+            EMSCRIPTEN_CMAKE="${EMSCRIPTEN_BIN_DIR}/emcmake"
             break
         fi
     done
@@ -266,7 +301,7 @@ for variant_name in $(resolve_variants "${VARIANT}"); do
         continue
     fi
 
-    if [ "${RECONFIGURE}" -eq 0 ] && variant_cache_matches "${OCCT_BUILD_DIR}" "${OCCT_INSTALL_DIR}" "${ACTIVE_OCCT_SRC_DIR}" "${EMSCRIPTEN_TOOLCHAIN}"; then
+    if [ "${RECONFIGURE}" -eq 0 ] && variant_cache_matches "${OCCT_BUILD_DIR}" "${OCCT_INSTALL_DIR}" "${ACTIVE_OCCT_SRC_DIR}" "${EMSCRIPTEN_TOOLCHAIN}" "${OCCT_C_FLAGS}" "${OCCT_CXX_FLAGS}"; then
         write_variant_stamp "${OCCT_INSTALL_DIR}" "${VARIANT_SIGNATURE}"
         echo "[build-occt] Adopted existing OCCT ${variant_name} cache at ${OCCT_INSTALL_DIR}"
         continue
@@ -278,8 +313,9 @@ for variant_name in $(resolve_variants "${VARIANT}"); do
     echo "[build-occt] Build cache:  ${OCCT_BUILD_DIR}"
     echo "[build-occt] Install dir:  ${OCCT_INSTALL_DIR}"
 
-    emcmake cmake -S "${ACTIVE_OCCT_SRC_DIR}" -B "${OCCT_BUILD_DIR}" \
+    "${EMSCRIPTEN_CMAKE}" cmake -S "${ACTIVE_OCCT_SRC_DIR}" -B "${OCCT_BUILD_DIR}" \
         -DCMAKE_TOOLCHAIN_FILE="${EMSCRIPTEN_TOOLCHAIN}" \
+        -DEMSCRIPTEN=1 \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="${OCCT_INSTALL_DIR}" \
         -DCMAKE_C_FLAGS="${OCCT_C_FLAGS}" \

@@ -1137,7 +1137,7 @@ describe('getVersionInfo', () => {
         const k = makeKernel();
         const info = k.getVersionInfo();
 
-        expect(info.libraryVersion).toBe('1.1.0');
+        expect(info.libraryVersion).toBe('1.2.0');
         expect(info.apiVersion).toBe(1);
         expect(info.kernelVersion).toBe('8.0.0');
         expect(info.sessionId).toMatch(/^session_/);
